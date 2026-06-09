@@ -242,13 +242,26 @@ func (p *RolloverPredictor) solveConvectionEquation(grid GridData, tankHeight, t
 	n := p.cfg.GridPoints
 	dz := tankHeight / float64(n-1)
 	dt := 0.1
+	dtMin := 0.001
+	dtMax := 0.5
+
+	underRelaxation := 0.5
+	minRelaxation := 0.1
+	maxRelaxation := 0.8
 
 	rho := make([]float64, n)
 	copy(rho, grid.Densities)
 
 	rhoNew := make([]float64, n)
+	copy(rhoNew, grid.Densities)
+
+	rhoPrev := make([]float64, n)
+	copy(rhoPrev, grid.Densities)
+
 	u := make([]float64, n)
 	copy(u, grid.Velocities)
+
+	uPrev := make([]float64, n)
 
 	g := 9.81
 	nu := 1.0e-6
@@ -257,7 +270,14 @@ func (p *RolloverPredictor) solveConvectionEquation(grid GridData, tankHeight, t
 	var criticalTime float64 = -1
 	maxTimeSteps := p.cfg.TimeSteps
 
+	var maxResidual float64
+	consecutiveDivergence := 0
+	boundaryChangeCount := 0
+
 	for step := 0; step < maxTimeSteps; step++ {
+		copy(uPrev, u)
+		copy(rhoPrev, rho)
+
 		for i := 1; i < n-1; i++ {
 			if rho[i] == 0 {
 				continue
@@ -266,17 +286,21 @@ func (p *RolloverPredictor) solveConvectionEquation(grid GridData, tankHeight, t
 			buoyancy := -g * drho_dz / rho[i]
 
 			du_dz2 := (u[i+1] - 2*u[i] + u[i-1]) / (dz * dz)
-			u[i] += dt * (buoyancy + nu*du_dz2)
+			du_dt := buoyancy + nu*du_dz2
+
+			u[i] = uPrev[i] + underRelaxation*dt*du_dt
 
 			CFL := math.Abs(u[i]) * dt / dz
 			if CFL > 0.5 {
-				dt = 0.5 * dz / math.Max(math.Abs(u[i]), 1e-10)
+				dt = 0.4 * dz / math.Max(math.Abs(u[i]), 1e-10)
+				dt = math.Max(dtMin, math.Min(dtMax, dt))
 			}
 		}
 
 		u[0] = 0
 		u[n-1] = 0
 
+		maxRhoChange := 0.0
 		for i := 1; i < n-1; i++ {
 			drho_dz := (rho[i+1] - rho[i-1]) / (2 * dz)
 			d2rho_dz2 := (rho[i+1] - 2*rho[i] + rho[i-1]) / (dz * dz)
@@ -284,11 +308,57 @@ func (p *RolloverPredictor) solveConvectionEquation(grid GridData, tankHeight, t
 			advection := -u[i] * drho_dz
 			diffusion := alphaT * d2rho_dz2
 
-			rhoNew[i] = rho[i] + dt*(advection+diffusion)
+			drho_dt := advection + diffusion
+			rhoNew[i] = rho[i] + underRelaxation*dt*drho_dt
+
+			change := math.Abs(rhoNew[i] - rho[i])
+			if change > maxRhoChange {
+				maxRhoChange = change
+			}
 		}
 
 		rhoNew[0] = rho[0]
 		rhoNew[n-1] = rho[n-1]
+
+		boundaryChange := math.Abs(rho[0]-rhoPrev[0]) + math.Abs(rho[n-1]-rhoPrev[n-1])
+		if boundaryChange > 0.5 {
+			boundaryChangeCount++
+			if boundaryChangeCount > 2 {
+				underRelaxation = math.Max(minRelaxation, underRelaxation*0.7)
+				dt = math.Max(dtMin, dt*0.5)
+				boundaryChangeCount = 0
+			}
+		} else {
+			boundaryChangeCount = 0
+		}
+
+		residual := 0.0
+		for i := 1; i < n-1; i++ {
+			contRes := (rhoNew[i]-rho[i])/dt + (u[i+1]*rhoNew[i+1]-u[i-1]*rhoNew[i-1])/(2*dz)
+			residual += contRes * contRes
+		}
+		residual = math.Sqrt(residual / float64(n-2))
+
+		if step > 0 {
+			if residual > maxResidual*2.0 && maxResidual > 1e-10 {
+				consecutiveDivergence++
+				if consecutiveDivergence >= 2 {
+					underRelaxation = math.Max(minRelaxation, underRelaxation*0.6)
+					dt = math.Max(dtMin, dt*0.5)
+					copy(rho, rhoPrev)
+					copy(u, uPrev)
+					consecutiveDivergence = 0
+					continue
+				}
+			} else {
+				consecutiveDivergence = 0
+				if residual < maxResidual*0.5 && maxResidual > 0 {
+					underRelaxation = math.Min(maxRelaxation, underRelaxation*1.05)
+					dt = math.Min(dtMax, dt*1.1)
+				}
+			}
+		}
+		maxResidual = math.Max(maxResidual, residual)
 
 		copy(rho, rhoNew)
 

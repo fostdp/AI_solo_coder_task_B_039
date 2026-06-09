@@ -33,6 +33,8 @@ func (e *AlarmEngine) Start(ctx context.Context, tankCount int) {
 	}
 	defer e.opcuaClient.Close()
 
+	e.opcuaClient.StartHeartbeat(ctx)
+
 	for {
 		select {
 		case <-ctx.Done():

@@ -11,9 +11,49 @@ class TankScene {
         this.selectedSensor = null;
         this.onSensorClick = null;
 
+        this.detectDevice();
         this.init();
         this.setupEventListeners();
         this.animate();
+    }
+
+    detectDevice() {
+        const ua = navigator.userAgent.toLowerCase();
+        const isMobile = /android|webos|iphone|ipad|ipod|blackberry|iemobile|opera mini/i.test(ua);
+        const isLowEnd = window.innerWidth < 768 || navigator.hardwareConcurrency <= 4;
+
+        this.isMobile = isMobile || isLowEnd;
+
+        if (this.isMobile) {
+            console.log('Mobile device detected, enabling performance optimizations');
+            this.quality = {
+                cylinderSegments: 24,
+                sphereSegments: 12,
+                wireframeSegments: 16,
+                pixelRatio: 1,
+                shadows: false,
+                fog: false,
+                antialias: false,
+                glowEffects: false,
+                animationQuality: 'low'
+            };
+        } else {
+            this.quality = {
+                cylinderSegments: 64,
+                sphereSegments: 16,
+                wireframeSegments: 32,
+                pixelRatio: Math.min(window.devicePixelRatio, 2),
+                shadows: true,
+                fog: true,
+                antialias: true,
+                glowEffects: true,
+                animationQuality: 'high'
+            };
+        }
+
+        this.fpsHistory = [];
+        this.lastFpsUpdate = Date.now();
+        this.frameCount = 0;
     }
 
     init() {
@@ -23,27 +63,33 @@ class TankScene {
 
         this.scene = new THREE.Scene();
         this.scene.background = new THREE.Color(0x0a0a15);
-        this.scene.fog = new THREE.Fog(0x0a0a15, 50, 200);
+        if (this.quality.fog) {
+            this.scene.fog = new THREE.Fog(0x0a0a15, 50, 200);
+        }
 
         this.camera = new THREE.PerspectiveCamera(45, this.width / this.height, 0.1, 1000);
         this.camera.position.set(80, 40, 80);
 
         this.renderer = new THREE.WebGLRenderer({
             canvas: this.canvas,
-            antialias: true,
-            alpha: true
+            antialias: this.quality.antialias,
+            alpha: true,
+            powerPreference: this.isMobile ? 'low-power' : 'high-performance'
         });
         this.renderer.setSize(this.width, this.height);
-        this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-        this.renderer.shadowMap.enabled = true;
-        this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        this.renderer.setPixelRatio(this.quality.pixelRatio);
+        this.renderer.shadowMap.enabled = this.quality.shadows;
+        if (this.quality.shadows) {
+            this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        }
 
         this.controls = new THREE.OrbitControls(this.camera, this.canvas);
-        this.controls.enableDamping = true;
-        this.controls.dampingFactor = 0.05;
+        this.controls.enableDamping = !this.isMobile;
+        this.controls.dampingFactor = this.isMobile ? 0 : 0.05;
         this.controls.minDistance = 30;
         this.controls.maxDistance = 200;
         this.controls.maxPolarAngle = Math.PI / 2 + 0.1;
+        this.controls.enablePan = !this.isMobile;
 
         this.setupLighting();
         this.createTank();
@@ -56,24 +102,28 @@ class TankScene {
 
         const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
         directionalLight.position.set(50, 100, 50);
-        directionalLight.castShadow = true;
-        directionalLight.shadow.mapSize.width = 2048;
-        directionalLight.shadow.mapSize.height = 2048;
-        directionalLight.shadow.camera.near = 0.5;
-        directionalLight.shadow.camera.far = 500;
-        directionalLight.shadow.camera.left = -100;
-        directionalLight.shadow.camera.right = 100;
-        directionalLight.shadow.camera.top = 100;
-        directionalLight.shadow.camera.bottom = -100;
+        directionalLight.castShadow = this.quality.shadows;
+        if (this.quality.shadows) {
+            directionalLight.shadow.mapSize.width = 1024;
+            directionalLight.shadow.mapSize.height = 1024;
+            directionalLight.shadow.camera.near = 0.5;
+            directionalLight.shadow.camera.far = 500;
+            directionalLight.shadow.camera.left = -100;
+            directionalLight.shadow.camera.right = 100;
+            directionalLight.shadow.camera.top = 100;
+            directionalLight.shadow.camera.bottom = -100;
+        }
         this.scene.add(directionalLight);
 
-        const pointLight1 = new THREE.PointLight(0x00ffff, 0.3, 100);
-        pointLight1.position.set(-50, 30, -50);
-        this.scene.add(pointLight1);
+        if (!this.isMobile) {
+            const pointLight1 = new THREE.PointLight(0x00ffff, 0.3, 100);
+            pointLight1.position.set(-50, 30, -50);
+            this.scene.add(pointLight1);
 
-        const pointLight2 = new THREE.PointLight(0x0080ff, 0.2, 100);
-        pointLight2.position.set(50, 60, -50);
-        this.scene.add(pointLight2);
+            const pointLight2 = new THREE.PointLight(0x0080ff, 0.2, 100);
+            pointLight2.position.set(50, 60, -50);
+            this.scene.add(pointLight2);
+        }
     }
 
     createTank() {
@@ -82,8 +132,12 @@ class TankScene {
 
         const tankHeight = CONFIG.TANK_HEIGHT;
         const tankRadius = CONFIG.TANK_DIAMETER / 2;
+        const q = this.quality;
 
-        const outerGeometry = new THREE.CylinderGeometry(tankRadius + 0.5, tankRadius + 0.5, tankHeight, 64, 1, true);
+        const outerGeometry = new THREE.CylinderGeometry(
+            tankRadius + 0.5, tankRadius + 0.5, tankHeight,
+            q.cylinderSegments, 1, true
+        );
         const outerMaterial = new THREE.MeshPhongMaterial({
             color: 0x1a1a2e,
             transparent: true,
@@ -93,14 +147,17 @@ class TankScene {
         });
         const outerShell = new THREE.Mesh(outerGeometry, outerMaterial);
         outerShell.position.y = tankHeight / 2;
-        outerShell.receiveShadow = true;
+        outerShell.receiveShadow = q.shadows;
         this.tankGroup.add(outerShell);
 
-        const wireframeGeometry = new THREE.CylinderGeometry(tankRadius + 0.5, tankRadius + 0.5, tankHeight, 32, 8, true);
+        const wireframeGeometry = new THREE.CylinderGeometry(
+            tankRadius + 0.5, tankRadius + 0.5, tankHeight,
+            q.wireframeSegments, 4, true
+        );
         const wireframeMaterial = new THREE.MeshBasicMaterial({
             color: 0x00ffff,
             transparent: true,
-            opacity: 0.15,
+            opacity: this.isMobile ? 0.1 : 0.15,
             wireframe: true
         });
         const wireframe = new THREE.Mesh(wireframeGeometry, wireframeMaterial);
@@ -112,11 +169,14 @@ class TankScene {
         const layerRadius = tankRadius - 1;
 
         for (let i = 0; i < CONFIG.LAYERS; i++) {
-            const layerGeometry = new THREE.CylinderGeometry(layerRadius, layerRadius, layerHeight - 0.2, 32);
+            const layerGeometry = new THREE.CylinderGeometry(
+                layerRadius, layerRadius, layerHeight - 0.2,
+                q.wireframeSegments
+            );
             const layerMaterial = new THREE.MeshPhongMaterial({
                 color: 0x0000ff,
                 transparent: true,
-                opacity: 0.6,
+                opacity: this.isMobile ? 0.5 : 0.6,
                 side: THREE.DoubleSide
             });
             const layerMesh = new THREE.Mesh(layerGeometry, layerMaterial);
@@ -126,37 +186,57 @@ class TankScene {
             this.layerMeshes.push(layerMesh);
             this.tankGroup.add(layerMesh);
 
-            const ringGeometry = new THREE.TorusGeometry(layerRadius + 0.1, 0.05, 8, 32);
-            const ringMaterial = new THREE.MeshBasicMaterial({ color: 0x00ffff, transparent: true, opacity: 0.5 });
+            const ringGeometry = new THREE.TorusGeometry(
+                layerRadius + 0.1, 0.05,
+                this.isMobile ? 4 : 8,
+                q.wireframeSegments
+            );
+            const ringMaterial = new THREE.MeshBasicMaterial({
+                color: 0x00ffff,
+                transparent: true,
+                opacity: this.isMobile ? 0.3 : 0.5
+            });
             const ring = new THREE.Mesh(ringGeometry, ringMaterial);
             ring.position.y = (i + 1) * layerHeight;
             ring.rotation.x = Math.PI / 2;
             this.tankGroup.add(ring);
         }
 
-        const baseGeometry = new THREE.CylinderGeometry(tankRadius + 1, tankRadius + 2, 2, 32);
+        const baseGeometry = new THREE.CylinderGeometry(
+            tankRadius + 1, tankRadius + 2, 2,
+            q.wireframeSegments
+        );
         const baseMaterial = new THREE.MeshPhongMaterial({ color: 0x2a2a4e });
         const base = new THREE.Mesh(baseGeometry, baseMaterial);
         base.position.y = -1;
-        base.receiveShadow = true;
+        base.receiveShadow = q.shadows;
         this.tankGroup.add(base);
 
-        const topGeometry = new THREE.CylinderGeometry(tankRadius + 0.5, tankRadius + 1, 1, 32);
+        const topGeometry = new THREE.CylinderGeometry(
+            tankRadius + 0.5, tankRadius + 1, 1,
+            q.wireframeSegments
+        );
         const topMaterial = new THREE.MeshPhongMaterial({ color: 0x2a2a4e });
         const top = new THREE.Mesh(topGeometry, topMaterial);
         top.position.y = tankHeight + 0.5;
-        top.receiveShadow = true;
+        top.receiveShadow = q.shadows;
         this.tankGroup.add(top);
 
-        const domeGeometry = new THREE.SphereGeometry(tankRadius + 0.5, 32, 16, 0, Math.PI * 2, 0, Math.PI / 2);
-        const domeMaterial = new THREE.MeshPhongMaterial({
-            color: 0x1a1a2e,
-            transparent: true,
-            opacity: 0.4
-        });
-        const dome = new THREE.Mesh(domeGeometry, domeMaterial);
-        dome.position.y = tankHeight + 1;
-        this.tankGroup.add(dome);
+        if (!this.isMobile) {
+            const domeGeometry = new THREE.SphereGeometry(
+                tankRadius + 0.5,
+                q.sphereSegments, q.sphereSegments / 2,
+                0, Math.PI * 2, 0, Math.PI / 2
+            );
+            const domeMaterial = new THREE.MeshPhongMaterial({
+                color: 0x1a1a2e,
+                transparent: true,
+                opacity: 0.4
+            });
+            const dome = new THREE.Mesh(domeGeometry, domeMaterial);
+            dome.position.y = tankHeight + 1;
+            this.tankGroup.add(dome);
+        }
 
         this.createSensors(tankRadius, tankHeight);
         this.scene.add(this.tankGroup);
@@ -167,6 +247,7 @@ class TankScene {
         this.sensors = [];
 
         const sensorRadius = tankRadius - 2;
+        const q = this.quality;
 
         for (let layer = 0; layer < CONFIG.LAYERS; layer++) {
             const y = CONFIG.LAYER_HEIGHTS[layer];
@@ -175,7 +256,10 @@ class TankScene {
                 const x = Math.cos(angle) * sensorRadius;
                 const z = Math.sin(angle) * sensorRadius;
 
-                const geometry = new THREE.SphereGeometry(0.4, 16, 16);
+                const geometry = new THREE.SphereGeometry(
+                    this.isMobile ? 0.5 : 0.4,
+                    q.sphereSegments, q.sphereSegments
+                );
                 const material = new THREE.MeshBasicMaterial({
                     color: 0x00ffff,
                     transparent: true,
@@ -190,14 +274,16 @@ class TankScene {
                     temperature: CONFIG.TEMP_MIN
                 };
 
-                const glowGeometry = new THREE.SphereGeometry(0.6, 16, 16);
-                const glowMaterial = new THREE.MeshBasicMaterial({
-                    color: 0x00ffff,
-                    transparent: true,
-                    opacity: 0.2
-                });
-                const glow = new THREE.Mesh(glowGeometry, glowMaterial);
-                sensor.add(glow);
+                if (q.glowEffects) {
+                    const glowGeometry = new THREE.SphereGeometry(0.6, q.sphereSegments, q.sphereSegments);
+                    const glowMaterial = new THREE.MeshBasicMaterial({
+                        color: 0x00ffff,
+                        transparent: true,
+                        opacity: 0.2
+                    });
+                    const glow = new THREE.Mesh(glowGeometry, glowMaterial);
+                    sensor.add(glow);
+                }
 
                 this.sensors.push(sensor);
                 this.sensorGroup.add(sensor);
@@ -206,7 +292,7 @@ class TankScene {
 
         for (let i = 0; i < CONFIG.DENSITY_METERS; i++) {
             const y = CONFIG.DENSITY_HEIGHTS[i];
-            const geometry = new THREE.CylinderGeometry(0.3, 0.3, 1.5, 16);
+            const geometry = new THREE.CylinderGeometry(0.3, 0.3, 1.5, q.sphereSegments);
             const material = new THREE.MeshBasicMaterial({
                 color: 0xff8800,
                 transparent: true,
@@ -220,14 +306,16 @@ class TankScene {
                 density: 420
             };
 
-            const glowGeometry = new THREE.CylinderGeometry(0.5, 0.5, 1.7, 16);
-            const glowMaterial = new THREE.MeshBasicMaterial({
-                color: 0xff8800,
-                transparent: true,
-                opacity: 0.2
-            });
-            const glow = new THREE.Mesh(glowGeometry, glowMaterial);
-            sensor.add(glow);
+            if (q.glowEffects) {
+                const glowGeometry = new THREE.CylinderGeometry(0.5, 0.5, 1.7, q.sphereSegments);
+                const glowMaterial = new THREE.MeshBasicMaterial({
+                    color: 0xff8800,
+                    transparent: true,
+                    opacity: 0.2
+                });
+                const glow = new THREE.Mesh(glowGeometry, glowMaterial);
+                sensor.add(glow);
+            }
 
             this.sensors.push(sensor);
             this.sensorGroup.add(sensor);
@@ -419,14 +507,60 @@ class TankScene {
             this.controls.update();
         }
 
-        const time = Date.now() * 0.001;
-        this.sensors.forEach((sensor, index) => {
-            const baseScale = sensor === this.selectedSensor ? 1.5 : 1;
-            const pulse = 1 + Math.sin(time * 2 + index * 0.5) * 0.1;
-            sensor.scale.setScalar(baseScale * pulse);
-        });
+        if (this.quality.animationQuality === 'high') {
+            const time = Date.now() * 0.001;
+            this.sensors.forEach((sensor, index) => {
+                const baseScale = sensor === this.selectedSensor ? 1.5 : 1;
+                const pulse = 1 + Math.sin(time * 2 + index * 0.5) * 0.1;
+                sensor.scale.setScalar(baseScale * pulse);
+            });
+        } else {
+            this.sensors.forEach(sensor => {
+                const baseScale = sensor === this.selectedSensor ? 1.3 : 1;
+                sensor.scale.setScalar(baseScale);
+            });
+        }
 
         this.renderer.render(this.scene, this.camera);
+        this.updateFPS();
+    }
+
+    updateFPS() {
+        this.frameCount++;
+        const now = Date.now();
+        if (now - this.lastFpsUpdate >= 1000) {
+            const fps = this.frameCount * 1000 / (now - this.lastFpsUpdate);
+            this.fpsHistory.push(fps);
+            if (this.fpsHistory.length > 10) {
+                this.fpsHistory.shift();
+            }
+
+            const avgFPS = this.fpsHistory.reduce((a, b) => a + b, 0) / this.fpsHistory.length;
+
+            if (this.isMobile && this.fpsHistory.length >= 5) {
+                if (avgFPS < 20 && this.quality.animationQuality !== 'low') {
+                    console.log(`FPS dropped to ${avgFPS.toFixed(1)}, downgrading quality`);
+                    this.downgradeQuality();
+                }
+            }
+
+            this.frameCount = 0;
+            this.lastFpsUpdate = now;
+        }
+    }
+
+    downgradeQuality() {
+        if (this.quality.animationQuality === 'high') {
+            this.quality.animationQuality = 'medium';
+            this.quality.cylinderSegments = Math.max(16, this.quality.cylinderSegments - 8);
+            this.quality.wireframeSegments = Math.max(12, this.quality.wireframeSegments - 8);
+        } else if (this.quality.animationQuality === 'medium') {
+            this.quality.animationQuality = 'low';
+            this.quality.shadows = false;
+            this.quality.antialias = false;
+            this.quality.glowEffects = false;
+            this.renderer.shadowMap.enabled = false;
+        }
     }
 
     rotateTank(angle) {

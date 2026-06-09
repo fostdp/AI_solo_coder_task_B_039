@@ -7,16 +7,103 @@ import (
 	"lng-monitoring/database"
 	"lng-monitoring/models"
 	"math"
+	"sync"
 	"time"
 
 	"github.com/goburrow/modbus"
 )
 
+type Priority int
+
+const (
+	PriorityHigh   Priority = 3
+	PriorityMedium Priority = 2
+	PriorityLow    Priority = 1
+)
+
+type ModbusTask struct {
+	ID         string
+	Priority   Priority
+	Interval   time.Duration
+	LastRun    time.Time
+	Execute    func(ctx context.Context) error
+	Retries    int
+	MaxRetries int
+}
+
+type PriorityQueue struct {
+	tasks  []*ModbusTask
+	mu     sync.Mutex
+}
+
 type Collector struct {
-	cfg    *config.ModbusConfig
-	db     *database.DB
-	client modbus.Client
-	handler *modbus.TCPClientHandler
+	cfg       *config.ModbusConfig
+	db        *database.DB
+	client    modbus.Client
+	handler   *modbus.TCPClientHandler
+	queue     *PriorityQueue
+	highFreq  *time.Ticker
+	lowFreq   *time.Ticker
+}
+
+func (pq *PriorityQueue) Push(task *ModbusTask) {
+	pq.mu.Lock()
+	defer pq.mu.Unlock()
+	pq.tasks = append(pq.tasks, task)
+	pq.heapifyUp(len(pq.tasks) - 1)
+}
+
+func (pq *PriorityQueue) Pop() *ModbusTask {
+	pq.mu.Lock()
+	defer pq.mu.Unlock()
+	if len(pq.tasks) == 0 {
+		return nil
+	}
+	task := pq.tasks[0]
+	last := len(pq.tasks) - 1
+	pq.tasks[0] = pq.tasks[last]
+	pq.tasks = pq.tasks[:last]
+	pq.heapifyDown(0)
+	return task
+}
+
+func (pq *PriorityQueue) Len() int {
+	pq.mu.Lock()
+	defer pq.mu.Unlock()
+	return len(pq.tasks)
+}
+
+func (pq *PriorityQueue) heapifyUp(index int) {
+	for index > 0 {
+		parent := (index - 1) / 2
+		if pq.tasks[index].Priority > pq.tasks[parent].Priority {
+			pq.tasks[index], pq.tasks[parent] = pq.tasks[parent], pq.tasks[index]
+			index = parent
+		} else {
+			break
+		}
+	}
+}
+
+func (pq *PriorityQueue) heapifyDown(index int) {
+	n := len(pq.tasks)
+	for {
+		left := 2*index + 1
+		right := 2*index + 2
+		largest := index
+		if left < n && pq.tasks[left].Priority > pq.tasks[largest].Priority {
+			largest = left
+		}
+		if right < n && pq.tasks[right].Priority > pq.tasks[largest].Priority {
+			largest = right
+		}
+		if largest != index {
+			pq.tasks[index], pq.tasks[largest] = pq.tasks[largest], pq.tasks[index]
+			index = largest
+		} else {
+			break
+		}
+	}
 }
 
 func NewCollector(cfg *config.ModbusConfig, db *database.DB) (*Collector, error) {
@@ -31,10 +118,17 @@ func NewCollector(cfg *config.ModbusConfig, db *database.DB) (*Collector, error)
 		db:      db,
 		client:  client,
 		handler: handler,
+		queue:   &PriorityQueue{},
 	}, nil
 }
 
 func (c *Collector) Close() error {
+	if c.highFreq != nil {
+		c.highFreq.Stop()
+	}
+	if c.lowFreq != nil {
+		c.lowFreq.Stop()
+	}
 	if c.handler != nil {
 		return c.handler.Close()
 	}
@@ -46,38 +140,109 @@ func (c *Collector) Connect() error {
 }
 
 func (c *Collector) Start(ctx context.Context) {
-	ticker := time.NewTicker(time.Duration(c.cfg.IntervalSec) * time.Second)
-	defer ticker.Stop()
+	interval := time.Duration(c.cfg.IntervalSec) * time.Second
+	c.highFreq = time.NewTicker(interval)
+	c.lowFreq = time.NewTicker(interval * 2)
+	defer c.highFreq.Stop()
+	defer c.lowFreq.Stop()
+
+	go c.processQueue(ctx)
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
-			if err := c.CollectAndStore(ctx); err != nil {
-				fmt.Printf("Modbus collection error: %v\n", err)
+		case <-c.highFreq.C:
+			c.enqueueHighPriorityTasks(ctx)
+			c.enqueueMediumPriorityTasks(ctx)
+		case <-c.lowFreq.C:
+			c.enqueueLowPriorityTasks(ctx)
+		}
+	}
+}
+
+func (c *Collector) enqueueHighPriorityTasks(ctx context.Context) {
+	now := time.Now()
+	for tankID := 1; tankID <= c.cfg.TankCount; tankID++ {
+		tank := tankID
+		c.queue.Push(&ModbusTask{
+			ID:         fmt.Sprintf("pressure_%d", tank),
+			Priority:   PriorityHigh,
+			Interval:   time.Duration(c.cfg.IntervalSec) * time.Second,
+			LastRun:    now,
+			Execute:    func(ctx context.Context) error { return c.collectPressureData(ctx, tank, now) },
+			MaxRetries: 3,
+		})
+		c.queue.Push(&ModbusTask{
+			ID:         fmt.Sprintf("bog_%d", tank),
+			Priority:   PriorityHigh,
+			Interval:   time.Duration(c.cfg.IntervalSec) * time.Second,
+			LastRun:    now,
+			Execute:    func(ctx context.Context) error { return c.collectBOGData(ctx, tank, now) },
+			MaxRetries: 3,
+		})
+	}
+}
+
+func (c *Collector) enqueueMediumPriorityTasks(ctx context.Context) {
+	now := time.Now()
+	for tankID := 1; tankID <= c.cfg.TankCount; tankID++ {
+		tank := tankID
+		c.queue.Push(&ModbusTask{
+			ID:         fmt.Sprintf("density_%d", tank),
+			Priority:   PriorityMedium,
+			Interval:   time.Duration(c.cfg.IntervalSec) * time.Second,
+			LastRun:    now,
+			Execute:    func(ctx context.Context) error { return c.collectDensityData(ctx, tank, now) },
+			MaxRetries: 2,
+		})
+	}
+}
+
+func (c *Collector) enqueueLowPriorityTasks(ctx context.Context) {
+	now := time.Now()
+	for tankID := 1; tankID <= c.cfg.TankCount; tankID++ {
+		tank := tankID
+		c.queue.Push(&ModbusTask{
+			ID:         fmt.Sprintf("temperature_%d", tank),
+			Priority:   PriorityLow,
+			Interval:   time.Duration(c.cfg.IntervalSec) * 2 * time.Second,
+			LastRun:    now,
+			Execute:    func(ctx context.Context) error { return c.collectTemperatureData(ctx, tank, now) },
+			MaxRetries: 1,
+		})
+	}
+}
+
+func (c *Collector) processQueue(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			task := c.queue.Pop()
+			if task == nil {
+				time.Sleep(10 * time.Millisecond)
+				continue
+			}
+
+			if err := task.Execute(ctx); err != nil {
+				fmt.Printf("Task %s error: %v\n", task.ID, err)
+				if task.Retries < task.MaxRetries {
+					task.Retries++
+					time.AfterFunc(1*time.Second, func() {
+						c.queue.Push(task)
+					})
+				}
 			}
 		}
 	}
 }
 
-func (c *Collector) CollectAndStore(ctx context.Context) error {
-	now := time.Now()
-
-	for tankID := 1; tankID <= c.cfg.TankCount; tankID++ {
-		if err := c.collectTankData(ctx, tankID, now); err != nil {
-			fmt.Printf("Tank %d collection error: %v\n", tankID, err)
-			continue
-		}
-	}
-
-	return nil
-}
-
-func (c *Collector) collectTankData(ctx context.Context, tankID int, timestamp time.Time) error {
+func (c *Collector) collectTemperatureData(ctx context.Context, tankID int, timestamp time.Time) error {
 	baseAddr := (tankID - 1) * 1000
-
 	var tempData []models.TemperatureData
+
 	for layer := 1; layer <= c.cfg.Layers; layer++ {
 		for sensor := 0; sensor < c.cfg.ThermoPerLayer; sensor++ {
 			addr := baseAddr + (layer-1)*c.cfg.ThermoPerLayer + sensor
@@ -104,9 +269,14 @@ func (c *Collector) collectTankData(ctx context.Context, tankID int, timestamp t
 			fmt.Printf("Layer summary error: %v\n", err)
 		}
 	}
+	return nil
+}
 
+func (c *Collector) collectDensityData(ctx context.Context, tankID int, timestamp time.Time) error {
+	baseAddr := (tankID - 1) * 1000
 	var densityData []models.DensityData
 	heightPositions := []float64{4.0, 24.0, 44.0}
+
 	for sensor := 0; sensor < c.cfg.DensityMeters; sensor++ {
 		addr := baseAddr + 500 + sensor
 		density, err := c.readFloat(addr)
@@ -124,26 +294,33 @@ func (c *Collector) collectTankData(ctx context.Context, tankID int, timestamp t
 	}
 
 	if len(densityData) > 0 {
-		if err := c.db.InsertDensityData(ctx, densityData); err != nil {
-			return fmt.Errorf("insert density data: %w", err)
-		}
+		return c.db.InsertDensityData(ctx, densityData)
 	}
+	return nil
+}
 
+func (c *Collector) collectPressureData(ctx context.Context, tankID int, timestamp time.Time) error {
+	baseAddr := (tankID - 1) * 1000
 	pressureAddr := baseAddr + 600
+
 	pressure, err := c.readFloat(pressureAddr)
-	if err == nil {
-		pressureData := []models.PressureData{{
-			Time:          timestamp,
-			TankID:        tankID,
-			Pressure:      pressure,
-			ModbusAddress: pressureAddr,
-		}}
-		if err := c.db.InsertPressureData(ctx, pressureData); err != nil {
-			return fmt.Errorf("insert pressure data: %w", err)
-		}
+	if err != nil {
+		return fmt.Errorf("read pressure: %w", err)
 	}
 
+	pressureData := []models.PressureData{{
+		Time:          timestamp,
+		TankID:        tankID,
+		Pressure:      pressure,
+		ModbusAddress: pressureAddr,
+	}}
+	return c.db.InsertPressureData(ctx, pressureData)
+}
+
+func (c *Collector) collectBOGData(ctx context.Context, tankID int, timestamp time.Time) error {
+	baseAddr := (tankID - 1) * 1000
 	var bogData []models.BOGCompressorData
+
 	for compID := 1; compID <= 2; compID++ {
 		statusAddr := baseAddr + 700 + (compID-1)*10
 		vibAddr := statusAddr + 1
@@ -171,11 +348,8 @@ func (c *Collector) collectTankData(ctx context.Context, tankID int, timestamp t
 	}
 
 	if len(bogData) > 0 {
-		if err := c.db.InsertBOGCompressorData(ctx, bogData); err != nil {
-			return fmt.Errorf("insert BOG data: %w", err)
-		}
+		return c.db.InsertBOGCompressorData(ctx, bogData)
 	}
-
 	return nil
 }
 
