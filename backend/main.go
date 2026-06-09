@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"lng-monitoring/alarm"
 	"lng-monitoring/alarm_forwarder"
 	"lng-monitoring/api"
 	"lng-monitoring/config"
@@ -12,11 +11,52 @@ import (
 	"lng-monitoring/modbus_poller"
 	"lng-monitoring/models"
 	"lng-monitoring/rollover_predictor"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+)
+
+var (
+	modbusPollCount = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "modbus_poll_total",
+			Help: "Total number of Modbus poll operations",
+		},
+		[]string{"tank_id", "data_type"},
+	)
+
+	predictionDuration = promauto.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "prediction_duration_seconds",
+			Help:    "Prediction calculation duration",
+			Buckets: prometheus.DefBuckets,
+		},
+		[]string{"tank_id"},
+	)
+
+	alarmCount = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "alarm_total",
+			Help: "Total number of alarms generated",
+		},
+		[]string{"tank_id", "alarm_level"},
+	)
+
+	activeConnections = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "active_connections",
+			Help: "Number of active connections",
+		},
+		[]string{"module"},
+	)
 )
 
 type tankDataBuffer struct {
@@ -26,24 +66,38 @@ type tankDataBuffer struct {
 	hasTemp      bool
 	hasDensity   bool
 	hasPressure  bool
-	lastUpdate   time.Time
+	collectedAt  time.Time
 }
 
 func main() {
-	modelParamsPath := "config/model_params.json"
-	cfg := config.LoadWithModelParams(modelParamsPath)
+	go func() {
+		fmt.Println("pprof endpoint available at :6060/debug/pprof/")
+		http.ListenAndServe(":6060", nil)
+	}()
 
-	if cfg.ModelParams == nil {
-		fmt.Println("Warning: using default model parameters")
+	http.Handle("/metrics", promhttp.Handler())
+
+	cfg := config.LoadWithModelParams("./config/model_params.json")
+	if cfg == nil {
+		fmt.Println("Warning: Using default config")
+		os.Exit(1)
 	}
+
+	modelParams, err := config.LoadModelParams("./config/model_params.json")
+	if err != nil {
+		fmt.Printf("Warning: Failed to load model params: %v\n", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	db, err := database.New(&cfg.Database)
 	if err != nil {
-		fmt.Printf("Failed to connect to database: %v\n", err)
+		fmt.Printf("Database init failed: %v\n", err)
 		os.Exit(1)
 	}
 	defer db.Close()
-	fmt.Println("Database connected successfully")
+	fmt.Println("Database connected")
 
 	pollResultChan := make(chan modbus_poller.PollResult, 100)
 	predictionRequestChan := make(chan messages.PredictionRequest, 10)
@@ -53,22 +107,10 @@ func main() {
 
 	poller, err := modbus_poller.NewPoller(&cfg.Modbus, pollResultChan)
 	if err != nil {
-		fmt.Printf("Failed to create modbus poller: %v\n", err)
+		fmt.Printf("Modbus poller init failed: %v\n", err)
 		os.Exit(1)
 	}
-	defer poller.Close()
-
-	if err := poller.Connect(); err != nil {
-		fmt.Printf("Failed to connect to modbus: %v\n", err)
-		fmt.Println("Continuing without modbus connection (will retry)")
-	} else {
-		fmt.Println("Modbus connected successfully")
-	}
-
-	modelParams := cfg.ModelParams
-	if modelParams == nil {
-		modelParams = &config.ModelParams{}
-	}
+	fmt.Println("Modbus poller initialized")
 
 	predictor := rollover_predictor.NewPredictor(
 		modelParams,
@@ -92,44 +134,58 @@ func main() {
 	server := api.NewServer(cfg, db, nil, nil)
 	fmt.Println("API server initialized")
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
 	var wg sync.WaitGroup
-
-	tankBuffers := make(map[int]*tankDataBuffer)
-	for tankID := 1; tankID <= cfg.Modbus.TankCount; tankID++ {
-		tankBuffers[tankID] = &tankDataBuffer{}
-	}
-	var bufferMu sync.Mutex
 
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		fmt.Println("Starting Modbus data collection...")
 		poller.Start(ctx)
 	}()
 
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		fmt.Println("Starting data aggregation service...")
+		predictor.Start(ctx)
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		forwarder.Start(ctx)
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := server.Start(); err != nil {
+			fmt.Printf("API server error: %v\n", err)
+		}
+	}()
+
+	tankBuffers := make(map[int]*tankDataBuffer)
+	for i := 1; i <= 4; i++ {
+		tankBuffers[i] = &tankDataBuffer{}
+	}
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case result := <-pollResultChan:
-				if result.Error != nil {
-					fmt.Printf("Poll error for %s (tank %d): %v\n", result.TaskID, result.TankID, result.Error)
-					continue
-				}
+				modbusPollCount.WithLabelValues(
+					fmt.Sprintf("%d", result.TankID),
+					result.DataType,
+				).Inc()
 
-				bufferMu.Lock()
-				buf := tankBuffers[result.TankID]
-				if buf == nil {
+				buf, exists := tankBuffers[result.TankID]
+				if !exists {
 					buf = &tankDataBuffer{}
 					tankBuffers[result.TankID] = buf
 				}
+				buf.collectedAt = result.CollectedAt
 
 				switch result.DataType {
 				case "temperature":
@@ -147,18 +203,18 @@ func main() {
 						go db.InsertDensityData(ctx, densities)
 					}
 				case "pressure":
-					if pressures, ok := result.Data.([]models.PressureData); ok && len(pressures) > 0 {
-						buf.pressure = pressures[0].Pressure
-						buf.hasPressure = true
-						go db.InsertPressureData(ctx, pressures)
+					if pressureData, ok := result.Data.([]models.PressureData); ok {
+						if len(pressureData) > 0 {
+							buf.pressure = pressureData[0].Pressure
+							buf.hasPressure = true
+							go db.InsertPressureData(ctx, pressureData)
+						}
 					}
-				case "bog":
-					if bogData, ok := result.Data.([]models.BOGCompressorData); ok {
-						go db.InsertBOGCompressorData(ctx, bogData)
+				case "compressor":
+					if compData, ok := result.Data.([]models.BOGCompressorData); ok {
+						go db.InsertBOGCompressorData(ctx, compData)
 					}
 				}
-
-				buf.lastUpdate = result.CollectedAt
 
 				if buf.hasTemp && buf.hasDensity && buf.hasPressure {
 					req := messages.PredictionRequest{
@@ -166,7 +222,7 @@ func main() {
 						Temperatures: buf.temperatures,
 						Densities:    buf.densities,
 						Pressure:     buf.pressure,
-						CollectedAt:  buf.lastUpdate,
+						CollectedAt:  buf.collectedAt,
 					}
 
 					select {
@@ -174,28 +230,12 @@ func main() {
 						buf.hasTemp = false
 						buf.hasDensity = false
 						buf.hasPressure = false
-					case <-ctx.Done():
-						bufferMu.Unlock()
-						return
+					default:
+						fmt.Printf("Prediction channel full, skipping tank %d\n", result.TankID)
 					}
 				}
-				bufferMu.Unlock()
 			}
 		}
-	}()
-
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		fmt.Println("Starting rollover prediction service...")
-		predictor.Start(ctx)
-	}()
-
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		fmt.Println("Starting alarm forwarding service...")
-		forwarder.Start(ctx)
 	}()
 
 	wg.Add(1)
@@ -205,33 +245,44 @@ func main() {
 			select {
 			case <-ctx.Done():
 				return
+			case result := <-predictionResultChan:
+				if result.ErrorMessage == "" {
+					predictionDuration.WithLabelValues(
+						fmt.Sprintf("%d", result.TankID),
+					).Observe(time.Since(result.PredictedAt).Seconds())
+				}
 			case result := <-forwardResultChan:
 				if result.Success {
-					fmt.Printf("Command succeeded: %s for tank %d\n", result.Command.CommandType, result.Command.TankID)
-				} else {
-					fmt.Printf("Command failed: %s for tank %d: %s\n", result.Command.CommandType, result.Command.TankID, result.Error)
+					alarmCount.WithLabelValues(
+						fmt.Sprintf("%d", result.TankID),
+						result.AlarmLevel,
+					).Inc()
 				}
+			case <-controlCommandChan:
 			}
-		}
-	}()
-
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		fmt.Printf("Starting API server on %s:%d...\n", cfg.Server.Host, cfg.Server.Port)
-		if err := server.Start(); err != nil {
-			fmt.Printf("API server error: %v\n", err)
-			cancel()
 		}
 	}()
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-	<-sigChan
 
-	fmt.Println("\nReceived shutdown signal, stopping services...")
+	fmt.Println("\n=== LNG储罐翻滚预测系统已启动 ===")
+	fmt.Println("API: http://localhost:8080")
+	fmt.Println("Metrics: http://localhost:8080/metrics")
+	fmt.Println("pprof: http://localhost:6060/debug/pprof/")
+	fmt.Println("Press Ctrl+C to stop\n")
+
+	<-sigChan
+	fmt.Println("\nShutting down...")
 	cancel()
 
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownCancel()
+
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		fmt.Printf("API server shutdown error: %v\n", err)
+	}
+
 	wg.Wait()
-	fmt.Println("All services stopped gracefully")
+	fmt.Println("All services stopped")
 }

@@ -1,0 +1,39 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+  external_labels:
+    monitor: 'lng-monitoring'
+
+scrape_configs:
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  - job_name: 'lng-backend'
+    static_configs:
+      - targets: ['backend:8080']
+    metrics_path: '/metrics'
+
+  - job_name: 'lng-backend-pprof'
+    static_configs:
+      - targets: ['backend:6060']
+    metrics_path: '/debug/pprof'
+    scrape_interval: 60s
+
+  - job_name: 'modbus-simulator'
+    static_configs:
+      - targets: ['modbus-simulator:8000']
+    metrics_path: '/health'
+    scrape_interval: 30s
+
+  - job_name: 'opcua-simulator'
+    static_configs:
+      - targets: ['opcua-simulator:8001']
+    metrics_path: '/health'
+    scrape_interval: 30s
+
+  - job_name: 'timescaledb'
+    static_configs:
+      - targets: ['timescaledb:9187']
+    scrape_interval: 30s

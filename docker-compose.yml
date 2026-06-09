@@ -1,0 +1,129 @@
+version: '3.8'
+
+services:
+  timescaledb:
+    image: timescale/timescaledb:2.13.0-pg16
+    container_name: lng-timescaledb
+    environment:
+      POSTGRES_DB: lng_monitoring
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      TZ: Asia/Shanghai
+    ports:
+      - "5432:5432"
+    volumes:
+      - timescale-data:/var/lib/postgresql/data
+      - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - ./database/timescale-config.sh:/docker-entrypoint-initdb.d/99-config.sh:ro
+    command: >
+      postgres
+      -c shared_preload_libraries=timescaledb
+      -c timescaledb.enable_telemetry=off
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d lng_monitoring"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - lng-network
+
+  modbus-simulator:
+    build:
+      context: ./simulator
+      dockerfile: Dockerfile.modbus
+    container_name: lng-modbus-simulator
+    environment:
+      TZ: Asia/Shanghai
+    ports:
+      - "5020:502"
+      - "8000:8000"
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    networks:
+      - lng-network
+
+  opcua-simulator:
+    build:
+      context: ./simulator
+      dockerfile: Dockerfile.opcua
+    container_name: lng-opcua-simulator
+    environment:
+      TZ: Asia/Shanghai
+    ports:
+      - "4840:4840"
+      - "8001:8001"
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    networks:
+      - lng-network
+
+  backend:
+    build:
+      context: ./backend
+    container_name: lng-backend
+    environment:
+      DB_HOST: timescaledb
+      DB_PORT: 5432
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      DB_NAME: lng_monitoring
+      MODBUS_HOST: modbus-simulator
+      MODBUS_PORT: 502
+      OPCUA_ENDPOINT: opc.tcp://opcua-simulator:4840
+      SERVER_HOST: 0.0.0.0
+      SERVER_PORT: 8080
+      TZ: Asia/Shanghai
+    ports:
+      - "8080:8080"
+      - "6060:6060"
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      modbus-simulator:
+        condition: service_started
+      opcua-simulator:
+        condition: service_started
+    networks:
+      - lng-network
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.frontend
+    container_name: lng-frontend
+    environment:
+      TZ: Asia/Shanghai
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    networks:
+      - lng-network
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.48.0
+    container_name: lng-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=30d'
+    networks:
+      - lng-network
+    restart: unless-stopped
+
+volumes:
+  timescale-data:
+  prometheus-data:
+
+networks:
+  lng-network:
+    driver: bridge
