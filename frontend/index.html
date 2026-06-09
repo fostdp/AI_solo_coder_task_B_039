@@ -3,138 +3,131 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>智慧油田注水开发动态调控系统</title>
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-    <link rel="stylesheet" href="css/style.css" />
+    <title>LNG储罐翻滚预测与安全监控系统</title>
+    <link rel="stylesheet" href="css/style.css">
+    <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/examples/js/controls/OrbitControls.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
 </head>
 <body>
-    <div class="app-container">
-        <header class="app-header">
-            <h1>智慧油田注水开发动态调控系统</h1>
-            <div class="header-info">
-                <span id="current-time">--</span>
-                <span class="status-indicator online">系统在线</span>
+    <header class="header">
+        <h1>LNG储罐翻滚预测与安全监控系统</h1>
+        <div class="header-info">
+            <span id="current-time"></span>
+            <span class="status-indicator" id="system-status">
+                <span class="status-dot"></span>
+                系统正常
+            </span>
+        </div>
+    </header>
+
+    <div class="main-container">
+        <aside class="sidebar">
+            <div class="tank-list">
+                <h3>储罐列表</h3>
+                <div id="tank-buttons"></div>
             </div>
-        </header>
 
-        <div class="main-content">
-            <aside class="left-panel">
-                <div class="panel-section">
-                    <h3>核心指标</h3>
-                    <div class="indicator-cards">
-                        <div class="indicator-card oil">
-                            <div class="indicator-label">日产油量</div>
-                            <div class="indicator-value" id="daily-oil">--</div>
-                            <div class="indicator-unit">t</div>
-                            <div class="indicator-change" id="oil-change">--</div>
-                        </div>
-                        <div class="indicator-card water">
-                            <div class="indicator-label">日注水量</div>
-                            <div class="indicator-value" id="daily-water">--</div>
-                            <div class="indicator-unit">m³</div>
-                            <div class="indicator-change" id="water-change">--</div>
-                        </div>
-                        <div class="indicator-card cut">
-                            <div class="indicator-label">综合含水率</div>
-                            <div class="indicator-value" id="water-cut">--</div>
-                            <div class="indicator-unit">%</div>
-                            <div class="indicator-change" id="cut-change">--</div>
-                        </div>
+            <div class="alarm-panel">
+                <h3>活动告警</h3>
+                <div id="alarm-list"></div>
+            </div>
+
+            <div class="prediction-panel">
+                <h3>翻滚风险预测</h3>
+                <div class="risk-indicator">
+                    <div class="risk-gauge">
+                        <svg viewBox="0 0 120 60" class="gauge-svg">
+                            <defs>
+                                <linearGradient id="riskGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+                                    <stop offset="0%" style="stop-color:#00ff00;stop-opacity:1" />
+                                    <stop offset="50%" style="stop-color:#ffff00;stop-opacity:1" />
+                                    <stop offset="100%" style="stop-color:#ff0000;stop-opacity:1" />
+                                </linearGradient>
+                            </defs>
+                            <path d="M 10 55 A 50 50 0 0 1 110 55" fill="none" stroke="#333" stroke-width="8" stroke-linecap="round"/>
+                            <path id="risk-arc" d="M 10 55 A 50 50 0 0 1 110 55" fill="none" stroke="url(#riskGradient)" stroke-width="8" stroke-linecap="round" stroke-dasharray="0 158"/>
+                            <circle id="risk-pointer" cx="60" cy="55" r="4" fill="#fff" stroke="#333" stroke-width="2"/>
+                        </svg>
+                        <div class="risk-value" id="risk-value">0%</div>
+                    </div>
+                    <div class="prediction-details">
+                        <div><span>最大温差:</span> <span id="max-temp-diff">--</span></div>
+                        <div><span>最大密度差:</span> <span id="max-density-diff">--</span></div>
+                        <div><span>临界时间:</span> <span id="critical-time">--</span></div>
+                        <div><span>稳定性:</span> <span id="stability">--</span></div>
+                    </div>
+                    <div class="recommendation" id="recommendation">--</div>
+                </div>
+            </div>
+        </aside>
+
+        <main class="content">
+            <div class="view-controls">
+                <button class="view-btn active" data-view="3d">3D视图</button>
+                <button class="view-btn" data-view="section">剖面图</button>
+                <button class="view-btn" data-view="heatmap">热力图</button>
+                <div class="spacer"></div>
+                <button class="control-btn" id="refresh-btn">刷新数据</button>
+                <button class="control-btn" id="auto-refresh-toggle" data-active="true">
+                    <span class="auto-dot active"></span>
+                    自动刷新
+                </button>
+            </div>
+
+            <div class="canvas-container">
+                <canvas id="three-canvas"></canvas>
+                <canvas id="overlay-canvas"></canvas>
+                <div id="tank-info-overlay" class="tank-info-overlay"></div>
+            </div>
+
+            <div class="legend-panel">
+                <div class="legend-item">
+                    <div class="legend-title">温度分层 (℃)</div>
+                    <div class="gradient-bar" id="temp-gradient"></div>
+                    <div class="legend-labels">
+                        <span id="temp-min">-165</span>
+                        <span id="temp-max">-150</span>
                     </div>
                 </div>
-
-                <div class="panel-section">
-                    <h3>区块筛选</h3>
-                    <select id="block-selector" class="form-control">
-                        <option value="ALL">全部区块</option>
-                    </select>
-                </div>
-
-                <div class="panel-section">
-                    <h3>图层控制</h3>
-                    <div class="layer-controls">
-                        <label class="checkbox-item">
-                            <input type="checkbox" id="show-injection" checked>
-                            <span class="legend-circle injection"></span>
-                            注水井
-                        </label>
-                        <label class="checkbox-item">
-                            <input type="checkbox" id="show-production" checked>
-                            <span class="legend-triangle production"></span>
-                            采油井
-                        </label>
-                        <label class="checkbox-item">
-                            <input type="checkbox" id="show-relations" checked>
-                            <span class="legend-line"></span>
-                            注采对应关系
-                        </label>
-                        <label class="checkbox-item">
-                            <input type="checkbox" id="show-allocation" checked>
-                            <span class="legend-arrow"></span>
-                            调配建议
-                        </label>
+                <div class="legend-item">
+                    <div class="legend-title">密度等值线 (kg/m³)</div>
+                    <div class="contour-legend">
+                        <span class="contour-line thin"></span><span>422</span>
+                        <span class="contour-line medium"></span><span>424</span>
+                        <span class="contour-line thick"></span><span>426</span>
                     </div>
                 </div>
+            </div>
+        </main>
+    </div>
 
-                <div class="panel-section">
-                    <h3>注采受效图例</h3>
-                    <div class="legend-items">
-                        <div class="legend-item">
-                            <span class="legend-line" style="background: #00FF00;"></span>
-                            <span>高效受效</span>
-                        </div>
-                        <div class="legend-item">
-                            <span class="legend-line" style="background: #FFFF00;"></span>
-                            <span>中等受效</span>
-                        </div>
-                        <div class="legend-item">
-                            <span class="legend-line" style="background: #FF0000;"></span>
-                            <span>无效受效</span>
-                        </div>
-                    </div>
+    <div id="sensor-modal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 id="modal-title">传感器详情</h3>
+                <button class="close-btn" onclick="closeModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="sensor-info" id="sensor-info"></div>
+                <div class="chart-container">
+                    <div id="temperature-chart" style="width: 100%; height: 300px;"></div>
                 </div>
-
-                <div class="panel-section">
-                    <h3>告警信息 <span class="badge" id="alarm-badge">0</span></h3>
-                    <div class="alarm-list" id="alarm-list">
-                        <div class="no-data">暂无告警</div>
-                    </div>
+                <div class="chart-container">
+                    <div id="density-chart" style="width: 100%; height: 300px;"></div>
                 </div>
-            </aside>
-
-            <main class="map-container">
-                <div id="map"></div>
-                <canvas id="well-canvas"></canvas>
-                <div class="map-controls">
-                    <button class="control-btn" onclick="refreshAllData()">
-                        <span>🔄</span> 刷新数据
-                    </button>
-                    <button class="control-btn" onclick="runAllocation()">
-                        <span>📊</span> 生成调配建议
-                    </button>
-                    <button class="control-btn" onclick="checkAlarms()">
-                        <span>⚠️</span> 检查告警
-                    </button>
+                <div class="risk-panel">
+                    <h4>翻滚风险指数趋势</h4>
+                    <div id="risk-chart" style="width: 100%; height: 250px;"></div>
                 </div>
-            </main>
-
-            <aside class="right-panel" id="detail-panel" style="display: none;">
-                <div class="panel-header">
-                    <h3 id="detail-title">井详情</h3>
-                    <button class="close-btn" onclick="closeDetailPanel()">×</button>
-                </div>
-                <div class="panel-content" id="detail-content">
-                </div>
-            </aside>
+            </div>
         </div>
     </div>
 
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <script src="js/config.js"></script>
     <script src="js/api.js"></script>
-    <script src="js/map.js"></script>
-    <script src="js/charts.js"></script>
-    <script src="js/app.js"></script>
+    <script src="js/visualization.js"></script>
+    <script src="js/threeScene.js"></script>
+    <script src="js/main.js"></script>
 </body>
 </html>

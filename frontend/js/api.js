@@ -1,75 +1,79 @@
 const API = {
-    async getWells(wellType, blockName) {
-        const params = new URLSearchParams();
-        if (wellType) params.append('wellType', wellType);
-        if (blockName && blockName !== 'ALL') params.append('blockName', blockName);
-        
-        const response = await fetch(`${CONFIG.API_BASE_URL}/wells?${params}`);
-        return response.json();
+    async getTanks() {
+        const response = await fetch(`${CONFIG.API_BASE_URL}/tanks`);
+        return await response.json();
     },
 
-    async getWellById(wellId) {
-        const response = await fetch(`${CONFIG.API_BASE_URL}/wells/${wellId}`);
-        return response.json();
+    async getTank3DData(tankId) {
+        const response = await fetch(`${CONFIG.API_BASE_URL}/tanks/${tankId}/data`);
+        return await response.json();
     },
 
-    async getWellTrend(wellId, days = 90) {
-        const response = await fetch(`${CONFIG.API_BASE_URL}/wells/${wellId}/trend?days=${days}`);
-        return response.json();
+    async getTemperatureData(tankId) {
+        const response = await fetch(`${CONFIG.API_BASE_URL}/tanks/${tankId}/temperature`);
+        return await response.json();
     },
 
-    async getBlocks() {
-        const response = await fetch(`${CONFIG.API_BASE_URL}/wells/blocks`);
-        return response.json();
+    async getDensityData(tankId) {
+        const response = await fetch(`${CONFIG.API_BASE_URL}/tanks/${tankId}/density`);
+        return await response.json();
     },
 
-    async getCoreIndicators(blockName = 'ALL') {
-        const response = await fetch(`${CONFIG.API_BASE_URL}/summary/core-indicators?blockName=${blockName}`);
-        return response.json();
+    async getPressureData(tankId) {
+        const response = await fetch(`${CONFIG.API_BASE_URL}/tanks/${tankId}/pressure`);
+        return await response.json();
     },
 
-    async getRelations(blockName) {
-        const params = new URLSearchParams();
-        if (blockName && blockName !== 'ALL') params.append('blockName', blockName);
-        
-        const response = await fetch(`${CONFIG.API_BASE_URL}/relations/map-data?${params}`);
-        return response.json();
+    async getPrediction(tankId) {
+        const response = await fetch(`${CONFIG.API_BASE_URL}/tanks/${tankId}/prediction`);
+        return await response.json();
     },
 
-    async getLatestSuggestions() {
-        const response = await fetch(`${CONFIG.API_BASE_URL}/allocation/latest`);
-        return response.json();
+    async getLayerSummary(tankId, duration = 24) {
+        const response = await fetch(`${CONFIG.API_BASE_URL}/tanks/${tankId}/layer-summary?duration=${duration}`);
+        return await response.json();
     },
 
-    async getAlarms() {
-        const response = await fetch(`${CONFIG.API_BASE_URL}/alarms/unacknowledged`);
-        return response.json();
+    async getSensorTrend(tankId, layer, sensor, duration = 24) {
+        const response = await fetch(`${CONFIG.API_BASE_URL}/sensors/${tankId}/${layer}/${sensor}/trend?duration=${duration}`);
+        return await response.json();
     },
 
-    async runAllocation() {
-        const response = await fetch(`${CONFIG.API_BASE_URL}/allocation/run-now`, {
-            method: 'POST'
-        });
-        return response.json();
+    async getDensityTrend(tankId, sensor, duration = 24) {
+        const response = await fetch(`${CONFIG.API_BASE_URL}/density-sensors/${tankId}/${sensor}/trend?duration=${duration}`);
+        return await response.json();
     },
 
-    async checkAlarms() {
-        const response = await fetch(`${CONFIG.API_BASE_URL}/alarms/check-now`, {
-            method: 'POST'
-        });
-        return response.json();
+    async getActiveAlarms() {
+        const response = await fetch(`${CONFIG.API_BASE_URL}/alarms`);
+        return await response.json();
     },
 
     async acknowledgeAlarm(alarmId) {
         const response = await fetch(`${CONFIG.API_BASE_URL}/alarms/${alarmId}/acknowledge`, {
             method: 'POST'
         });
-        return response.json();
+        return await response.json();
     },
 
-    async getRelationsByWell(wellId, wellType) {
-        const endpoint = wellType === 'INJECTION' ? 'injection' : 'production';
-        const response = await fetch(`${CONFIG.API_BASE_URL}/relations/${endpoint}/${wellId}`);
-        return response.json();
+    async clearAlarm(alarmId) {
+        const response = await fetch(`${CONFIG.API_BASE_URL}/alarms/${alarmId}/clear`, {
+            method: 'POST'
+        });
+        return await response.json();
+    },
+
+    async getAlarmConfig() {
+        const response = await fetch(`${CONFIG.API_BASE_URL}/alarm-config`);
+        return await response.json();
+    },
+
+    async healthCheck() {
+        try {
+            const response = await fetch(`${CONFIG.API_BASE_URL}/health`);
+            return await response.json();
+        } catch (e) {
+            return { status: 'unhealthy' };
+        }
     }
 };
