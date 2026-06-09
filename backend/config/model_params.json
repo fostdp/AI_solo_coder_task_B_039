@@ -1,0 +1,71 @@
+{
+    "physical_properties": {
+        "gravity": 9.81,
+        "kinematic_viscosity": 1.5e-7,
+        "thermal_diffusivity": 1.2e-7,
+        "thermal_expansion_coefficient": 0.001,
+        "base_density": 425.0,
+        "min_density": 415.0,
+        "max_density": 470.0
+    },
+    "numerical_method": {
+        "grid_points": 50,
+        "initial_time_step": 0.1,
+        "min_time_step": 0.001,
+        "max_time_step": 0.5,
+        "initial_under_relaxation": 0.5,
+        "min_under_relaxation": 0.1,
+        "max_under_relaxation": 0.8,
+        "cfl_limit": 0.5,
+        "max_time_steps": 1000,
+        "divergence_threshold": 2.0,
+        "convergence_threshold": 0.5,
+        "boundary_change_threshold": 0.5,
+        "max_consecutive_divergence": 2
+    },
+    "stability_analysis": {
+        "buoyancy_frequency_scale": 100.0,
+        "interface_gradient_threshold": 50.0,
+        "convection_velocity_threshold": 0.01,
+        "rayleigh_number_critical": 1e9
+    },
+    "risk_calculation": {
+        "temp_diff_weight": 0.35,
+        "density_diff_weight": 0.25,
+        "instability_weight": 0.25,
+        "time_weight": 0.15,
+        "max_temp_diff_reference": 10.0,
+        "max_density_diff_reference": 5.0,
+        "critical_time_reference": 24.0,
+        "risk_thresholds": {
+            "high": 0.8,
+            "medium": 0.6,
+            "low": 0.2
+        }
+    },
+    "alarm_thresholds": {
+        "temp_diff_alarm": 8.0,
+        "density_diff_alarm": 2.0,
+        "pressure_threshold_pct": 90.0,
+        "design_pressure_mpa": 0.25
+    },
+    "modbus_config": {
+        "register_offset_pressure": 600,
+        "register_offset_bog": 700,
+        "register_offset_density": 500,
+        "register_offset_pump_control": 800,
+        "tank_register_block_size": 1000,
+        "compressors_per_tank": 2,
+        "pumps_per_tank": 3
+    },
+    "tank_specs": {
+        "height_meters": 48.0,
+        "diameter_meters": 80.0,
+        "capacity_cubic_meters": 160000,
+        "layers": 5,
+        "thermometers_per_layer": 8,
+        "density_meters": 3,
+        "density_sensor_heights": [4.0, 24.0, 44.0],
+        "layer_heights": [4.8, 14.4, 24.0, 33.6, 43.2]
+    }
+}
