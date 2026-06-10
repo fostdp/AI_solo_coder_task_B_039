@@ -4,10 +4,10 @@ import (
 	"context"
 	"fmt"
 	"lng-monitoring/alarm"
-	"lng-monitoring/bog_diagnostic"
+	"lng-monitoring/bog_diagnoser"
 	"lng-monitoring/config"
 	"lng-monitoring/database"
-	"lng-monitoring/heat_leak"
+	"lng-monitoring/insulation_monitor"
 	"lng-monitoring/models"
 	"lng-monitoring/multi_tank_scheduler"
 	"lng-monitoring/prediction"
@@ -25,8 +25,8 @@ type Server struct {
 	db                  *database.DB
 	predictor           *prediction.RolloverPredictor
 	alarmEngine         *alarm.AlarmEngine
-	bogDiagnostic       *bog_diagnostic.BOGDiagnosticService
-	heatLeakEvaluator   *heat_leak.HeatLeakEvaluator
+	bogDiagnostic       *bog_diagnoser.BOGDiagnoserService
+	heatLeakEvaluator   *insulation_monitor.InsulationMonitorService
 	unloadingPredictor  *unloading_predictor.UnloadingPredictor
 	multiTankScheduler  *multi_tank_scheduler.MultiTankScheduler
 	router              *gin.Engine
@@ -37,8 +37,8 @@ func NewServer(
 	db *database.DB,
 	predictor *prediction.RolloverPredictor,
 	alarmEngine *alarm.AlarmEngine,
-	bogDiagnostic *bog_diagnostic.BOGDiagnosticService,
-	heatLeakEvaluator *heat_leak.HeatLeakEvaluator,
+	bogDiagnostic *bog_diagnoser.BOGDiagnoserService,
+	heatLeakEvaluator *insulation_monitor.InsulationMonitorService,
 	unloadingPredictor *unloading_predictor.UnloadingPredictor,
 	multiTankScheduler *multi_tank_scheduler.MultiTankScheduler,
 ) *Server {
@@ -533,7 +533,7 @@ func (s *Server) RunHeatLeakEvaluation(c *gin.Context) {
 		historyHours = req.HistoryHours
 	}
 
-	result, err := s.heatLeakEvaluator.RunManualEvaluation(
+	result, err := s.heatLeakEvaluator.RunManualAssessment(
 		c.Request.Context(),
 		req.TankID,
 		req.AmbientTemp,

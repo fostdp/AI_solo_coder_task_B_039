@@ -1,4 +1,4 @@
-package bog_diagnostic
+package bog_diagnoser
 
 import (
 	"math"
@@ -151,7 +151,7 @@ func TestIsolationForestAccuracyAndRecall(t *testing.T) {
 
 func TestBearingFaultVsPistonRingWear(t *testing.T) {
 	cfg := testutils.NewTestConfig()
-	service := &BOGDiagnosticService{
+	service := &BOGDiagnoserService{
 		cfg:         cfg,
 		modelParams: &cfg.ModelParams.BOGDiagnostic,
 		iforest:     NewIsolationForest(100, 256),
@@ -217,7 +217,7 @@ func TestBearingFaultVsPistonRingWear(t *testing.T) {
 
 func TestBearingVsPistonDiscrimination(t *testing.T) {
 	cfg := testutils.NewTestConfig()
-	service := &BOGDiagnosticService{
+	service := &BOGDiagnoserService{
 		cfg:         cfg,
 		modelParams: &cfg.ModelParams.BOGDiagnostic,
 		iforest:     NewIsolationForest(100, 256),
@@ -259,7 +259,7 @@ func TestBearingVsPistonDiscrimination(t *testing.T) {
 
 func TestRecommendationTimeliness(t *testing.T) {
 	cfg := testutils.NewTestConfig()
-	service := &BOGDiagnosticService{
+	service := &BOGDiagnoserService{
 		cfg:         cfg,
 		modelParams: &cfg.ModelParams.BOGDiagnostic,
 	}
@@ -357,7 +357,7 @@ func TestRecommendationTimeliness(t *testing.T) {
 
 func TestRemainingLifeEstimation(t *testing.T) {
 	cfg := testutils.NewTestConfig()
-	service := &BOGDiagnosticService{
+	service := &BOGDiagnoserService{
 		cfg:         cfg,
 		modelParams: &cfg.ModelParams.BOGDiagnostic,
 	}
@@ -421,7 +421,7 @@ func TestRemainingLifeEstimation(t *testing.T) {
 
 func TestBoundaryConditions(t *testing.T) {
 	cfg := testutils.NewTestConfig()
-	service := &BOGDiagnosticService{
+	service := &BOGDiagnoserService{
 		cfg:         cfg,
 		modelParams: &cfg.ModelParams.BOGDiagnostic,
 		iforest:     NewIsolationForest(50, 100),
@@ -535,7 +535,7 @@ func TestBoundaryConditions(t *testing.T) {
 
 func TestDiagnoseCompressorEndToEnd(t *testing.T) {
 	cfg := testutils.NewTestConfig()
-	service := &BOGDiagnosticService{
+	service := &BOGDiagnoserService{
 		cfg:         cfg,
 		modelParams: &cfg.ModelParams.BOGDiagnostic,
 		iforest:     NewIsolationForest(100, 256),
@@ -634,7 +634,7 @@ func TestDiagnoseCompressorEndToEnd(t *testing.T) {
 
 func TestExtractFeatures(t *testing.T) {
 	cfg := testutils.NewTestConfig()
-	service := &BOGDiagnosticService{
+	service := &BOGDiagnoserService{
 		cfg:         cfg,
 		modelParams: &cfg.ModelParams.BOGDiagnostic,
 	}
@@ -662,7 +662,7 @@ func TestExtractFeatures(t *testing.T) {
 
 func TestCalculateTrend(t *testing.T) {
 	cfg := testutils.NewTestConfig()
-	service := &BOGDiagnosticService{
+	service := &BOGDiagnoserService{
 		cfg:         cfg,
 		modelParams: &cfg.ModelParams.BOGDiagnostic,
 	}
@@ -703,7 +703,7 @@ func TestCalculateTrend(t *testing.T) {
 
 func TestConfidenceCalculation(t *testing.T) {
 	cfg := testutils.NewTestConfig()
-	service := &BOGDiagnosticService{
+	service := &BOGDiagnoserService{
 		cfg:         cfg,
 		modelParams: &cfg.ModelParams.BOGDiagnostic,
 	}
@@ -757,7 +757,7 @@ func TestHarmonicNumber(t *testing.T) {
 }
 
 func TestNormalize(t *testing.T) {
-	s := &BOGDiagnosticService{}
+	s := &BOGDiagnoserService{}
 
 	testCases := []struct {
 		value    float64
@@ -903,7 +903,7 @@ func TestDiagnosticResultFields(t *testing.T) {
 
 func TestPerformanceBenchmark(t *testing.T) {
 	cfg := testutils.NewTestConfig()
-	service := &BOGDiagnosticService{
+	service := &BOGDiagnoserService{
 		cfg:         cfg,
 		modelParams: &cfg.ModelParams.BOGDiagnostic,
 		iforest:     NewIsolationForest(100, 256),
@@ -945,7 +945,7 @@ func TestPerformanceBenchmark(t *testing.T) {
 
 func TestRootCause_LoadFluctuationFalsePositiveReduction(t *testing.T) {
 	cfg := testutils.NewTestConfig()
-	service := &BOGDiagnosticService{
+	service := &BOGDiagnoserService{
 		cfg:         cfg,
 		modelParams: &cfg.ModelParams.BOGDiagnostic,
 		iforest:     NewIsolationForest(100, 256),
@@ -1013,7 +1013,7 @@ func TestRootCause_LoadFluctuationFalsePositiveReduction(t *testing.T) {
 
 func TestRootCause_SteadyStateIdentification(t *testing.T) {
 	cfg := testutils.NewTestConfig()
-	service := &BOGDiagnosticService{
+	service := &BOGDiagnoserService{
 		cfg:         cfg,
 		modelParams: &cfg.ModelParams.BOGDiagnostic,
 		iforest:     NewIsolationForest(100, 256),

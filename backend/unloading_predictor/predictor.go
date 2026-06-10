@@ -12,6 +12,11 @@ import (
 	"time"
 )
 
+const (
+	DefaultWorkerPoolSize = 3
+	MaxPendingTasks      = 10
+)
+
 type UnloadingPredictor struct {
 	cfg         *config.Config
 	db          *database.DB
@@ -19,6 +24,7 @@ type UnloadingPredictor struct {
 	resultChan  chan<- messages.UnloadingPrediction
 	mu          sync.RWMutex
 	modelParams *config.UnloadingParams
+	workerPool  *MixingModelWorkerPool
 }
 
 type OneDMixerModel struct {
@@ -34,6 +40,31 @@ type LayerState struct {
 	Density     float64
 	Height      float64
 	Mass        float64
+}
+
+type MixingModelTask struct {
+	ctx       context.Context
+	req       messages.UnloadingRequest
+	model     *OneDMixerModel
+	initState []LayerState
+	timeStep  float64
+	totalSteps int
+	resultChan chan *MixingModelResult
+}
+
+type MixingModelResult struct {
+	PredictedTemps     [][]float64
+	PredictedDensities [][]float64
+	TimeSteps          []float64
+	Error              error
+}
+
+type MixingModelWorkerPool struct {
+	taskChan    chan *MixingModelTask
+	workerCount int
+	wg          sync.WaitGroup
+	mu          sync.RWMutex
+	running     bool
 }
 
 func NewUnloadingPredictor(
@@ -63,16 +94,230 @@ func NewUnloadingPredictor(
 		params = &cfg.ModelParams.Unloading
 	}
 
+	workerPool := NewMixingModelWorkerPool(DefaultWorkerPoolSize)
+
 	return &UnloadingPredictor{
 		cfg:         cfg,
 		db:          db,
 		requestChan: requestChan,
 		resultChan:  resultChan,
 		modelParams: params,
+		workerPool:  workerPool,
+	}
+}
+
+func NewMixingModelWorkerPool(workerCount int) *MixingModelWorkerPool {
+	if workerCount <= 0 {
+		workerCount = DefaultWorkerPoolSize
+	}
+	return &MixingModelWorkerPool{
+		taskChan:    make(chan *MixingModelTask, MaxPendingTasks),
+		workerCount: workerCount,
+		running:     false,
+	}
+}
+
+func (pool *MixingModelWorkerPool) Start(ctx context.Context) {
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+
+	if pool.running {
+		return
+	}
+	pool.running = true
+
+	for i := 0; i < pool.workerCount; i++ {
+		pool.wg.Add(1)
+		go pool.worker(ctx, i)
+	}
+}
+
+func (pool *MixingModelWorkerPool) Stop() {
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+
+	if !pool.running {
+		return
+	}
+	pool.running = false
+	close(pool.taskChan)
+	pool.wg.Wait()
+}
+
+func (pool *MixingModelWorkerPool) Submit(task *MixingModelTask) bool {
+	pool.mu.RLock()
+	defer pool.mu.RUnlock()
+
+	if !pool.running {
+		return false
+	}
+
+	select {
+	case pool.taskChan <- task:
+		return true
+	default:
+		return false
+	}
+}
+
+func (pool *MixingModelWorkerPool) worker(ctx context.Context, workerID int) {
+	defer pool.wg.Done()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case task, ok := <-pool.taskChan:
+			if !ok {
+				return
+			}
+			result := pool.executeMixingModel(task)
+			select {
+			case task.resultChan <- result:
+			case <-task.ctx.Done():
+			case <-ctx.Done():
+			}
+		}
+	}
+}
+
+func (pool *MixingModelWorkerPool) executeMixingModel(task *MixingModelTask) *MixingModelResult {
+	select {
+	case <-task.ctx.Done():
+		return &MixingModelResult{Error: task.ctx.Err()}
+	default:
+	}
+
+	nLayers := task.model.nLayers
+	totalSteps := task.totalSteps
+	timeStep := task.timeStep
+
+	predictedTemps := make([][]float64, totalSteps)
+	predictedDensities := make([][]float64, totalSteps)
+	timeSteps := make([]float64, totalSteps)
+
+	currentState := make([]LayerState, nLayers)
+	copy(currentState, task.initState)
+
+	responseSteps := 3
+	flowHistory := make([]float64, 0, responseSteps)
+
+	for t := 0; t < totalSteps; t++ {
+		select {
+		case <-task.ctx.Done():
+			return &MixingModelResult{Error: task.ctx.Err()}
+		default:
+		}
+
+		timeSteps[t] = float64(t) * timeStep
+
+		currentTemps := make([]float64, nLayers)
+		currentDensities := make([]float64, nLayers)
+		for i := 0; i < nLayers; i++ {
+			currentTemps[i] = currentState[i].Temperature
+			currentDensities[i] = currentState[i].Density
+		}
+		predictedTemps[t] = currentTemps
+		predictedDensities[t] = currentDensities
+
+		if t < totalSteps-1 {
+			actualFlow := task.req.UnloadingRate
+			if t > 0 && task.req.FlowRateChanges != nil && len(task.req.FlowRateChanges) > 0 {
+				elapsedHours := float64(t) * timeStep
+				for _, change := range task.req.FlowRateChanges {
+					if math.Abs(elapsedHours-change.ChangeTimeHours) < timeStep*0.5 {
+						actualFlow = change.NewFlowRate
+						break
+					}
+				}
+			}
+
+			flowHistory = append(flowHistory, actualFlow)
+			if len(flowHistory) > responseSteps {
+				flowHistory = flowHistory[1:]
+			}
+
+			adaptiveReq := task.req
+			adaptiveReq.UnloadingRate = actualFlow
+
+			newState := make([]LayerState, nLayers)
+			copy(newState, currentState)
+
+			task.executeStep(newState, adaptiveReq, timeStep, t)
+
+			currentState = newState
+		}
+	}
+
+	return &MixingModelResult{
+		PredictedTemps:     predictedTemps,
+		PredictedDensities: predictedDensities,
+		TimeSteps:          timeSteps,
+	}
+}
+
+func (task *MixingModelTask) executeStep(state []LayerState, req messages.UnloadingRequest, timeStep float64, stepIndex int) {
+	nLayers := task.model.nLayers
+	unloadingMassFlow := req.UnloadingRate * req.UnloadingDensity / 3600.0
+	tankRadius := 20.0
+	tankArea := math.Pi * tankRadius * tankRadius
+
+	elapsedTime := float64(stepIndex) * timeStep
+	if elapsedTime >= req.EstimatedDuration {
+		return
+	}
+
+	newState := make([]LayerState, nLayers)
+	for i := range state {
+		newState[i] = state[i]
+	}
+
+	injectionLayer := 0
+	bestDiff := math.Inf(1)
+	for i := 0; i < nLayers; i++ {
+		diff := math.Abs(newState[i].Density - req.UnloadingDensity)
+		if diff < bestDiff {
+			bestDiff = diff
+			injectionLayer = i
+		}
+	}
+
+	if injectionLayer >= 0 && injectionLayer < nLayers {
+		massAdded := unloadingMassFlow * timeStep * task.model.mixingEfficiency
+		newState[injectionLayer].Mass += massAdded
+
+		oldTemp := newState[injectionLayer].Temperature
+		oldMass := newState[injectionLayer].Mass
+		newTemp := (oldTemp*(oldMass-massAdded) + req.UnloadingTemp*massAdded) / oldMass
+		newState[injectionLayer].Temperature = newTemp
+
+		newDensity := oldMass / (oldMass/state[injectionLayer].Density + massAdded/req.UnloadingDensity)
+		newState[injectionLayer].Density = newDensity
+	}
+
+	for i := 1; i < nLayers-1; i++ {
+		dispersionFluxT := task.model.axialDispersion * tankArea *
+			(newState[i+1].Temperature - 2*newState[i].Temperature + newState[i-1].Temperature) /
+			(task.model.layerHeights[1] - task.model.layerHeights[0])
+
+		dispersionFluxD := task.model.axialDispersion * tankArea *
+			(newState[i+1].Density - 2*newState[i].Density + newState[i-1].Density) /
+			(task.model.layerHeights[1] - task.model.layerHeights[0])
+
+		layerVolume := tankArea * (task.model.layerHeights[1] - task.model.layerHeights[0])
+		layerMass := newState[i].Mass
+
+		newState[i].Temperature += dispersionFluxT * timeStep / layerMass * 425.0 * 2200.0
+		newState[i].Density += dispersionFluxD * timeStep / layerVolume
+	}
+
+	for i := range state {
+		state[i] = newState[i]
 	}
 }
 
 func (p *UnloadingPredictor) Start(ctx context.Context) {
+	p.workerPool.Start(ctx)
 	go p.processLoop(ctx)
 }
 
@@ -128,12 +373,86 @@ func (p *UnloadingPredictor) predictUnloading(
 
 	initialState := p.initializeLayers(req, nLayers)
 
+	responseSteps := p.modelParams.ResponseTimeSteps
+	flowHistory := make([]float64, 0, responseSteps)
+
+	actualFlow := req.UnloadingRate
+	smoothedFlow := p.smoothFlowRate(actualFlow, flowHistory)
+	flowChangeRate := p.calculateFlowChangeRate(actualFlow, flowHistory)
+	adaptiveMixing, adaptiveDispersion := p.calculateAdaptiveParameters(flowChangeRate)
+	model.mixingEfficiency = adaptiveMixing
+	model.axialDispersion = adaptiveDispersion
+
+	adaptiveReq := req
+	adaptiveReq.UnloadingRate = smoothedFlow
+
+	resultChan := make(chan *MixingModelResult, 1)
+
+	task := &MixingModelTask{
+		ctx:        ctx,
+		req:        adaptiveReq,
+		model:      model,
+		initState:  initialState,
+		timeStep:   timeStep,
+		totalSteps: totalSteps,
+		resultChan: resultChan,
+	}
+
+	if !p.workerPool.Submit(task) {
+		return p.predictUnloadingFallback(ctx, req, model, initialState, timeStep, totalSteps)
+	}
+
+	select {
+	case <-ctx.Done():
+		return messages.UnloadingPrediction{
+			TankID:        req.TankID,
+			PredictedAt:   time.Now(),
+			ErrorMessage:  "context cancelled",
+		}
+	case result := <-resultChan:
+		if result.Error != nil {
+			return messages.UnloadingPrediction{
+				TankID:        req.TankID,
+				PredictedAt:   time.Now(),
+				ErrorMessage:  result.Error.Error(),
+			}
+		}
+
+		maxTempDiff, maxDensityDiff := p.calculateMaxDifferences(result.PredictedTemps, result.PredictedDensities)
+		optimalPumpOnTime := p.calculateOptimalPumpTime(result.PredictedTemps, result.PredictedDensities, result.TimeSteps, req)
+		rolloverRisk := p.calculateRolloverRisk(result.PredictedTemps, result.PredictedDensities)
+
+		return messages.UnloadingPrediction{
+			TankID:             req.TankID,
+			PredictedTemps:     result.PredictedTemps,
+			PredictedDensities: result.PredictedDensities,
+			TimeSteps:          result.TimeSteps,
+			MaxTempDiff:        maxTempDiff,
+			MaxDensityDiff:     maxDensityDiff,
+			OptimalPumpOnTime:  optimalPumpOnTime,
+			RolloverRisk:       rolloverRisk,
+			PredictedAt:        time.Now(),
+			AsyncComputed:      true,
+		}
+	}
+}
+
+func (p *UnloadingPredictor) predictUnloadingFallback(
+	ctx context.Context,
+	req messages.UnloadingRequest,
+	model *OneDMixerModel,
+	initialState []LayerState,
+	timeStep float64,
+	totalSteps int,
+) messages.UnloadingPrediction {
+	nLayers := model.nLayers
+
 	predictedTemps := make([][]float64, totalSteps)
 	predictedDensities := make([][]float64, totalSteps)
 	timeSteps := make([]float64, totalSteps)
 
-	responseSteps := p.modelParams.ResponseTimeSteps
-	flowHistory := make([]float64, 0, responseSteps)
+	currentState := make([]LayerState, nLayers)
+	copy(currentState, initialState)
 
 	for t := 0; t < totalSteps; t++ {
 		timeSteps[t] = float64(t) * timeStep
@@ -141,41 +460,17 @@ func (p *UnloadingPredictor) predictUnloading(
 		currentTemps := make([]float64, nLayers)
 		currentDensities := make([]float64, nLayers)
 		for i := 0; i < nLayers; i++ {
-			currentTemps[i] = initialState[i].Temperature
-			currentDensities[i] = initialState[i].Density
+			currentTemps[i] = currentState[i].Temperature
+			currentDensities[i] = currentState[i].Density
 		}
 		predictedTemps[t] = currentTemps
 		predictedDensities[t] = currentDensities
 
 		if t < totalSteps-1 {
-			actualFlow := req.UnloadingRate
-			if t > 0 && req.FlowRateChanges != nil && len(req.FlowRateChanges) > 0 {
-				elapsedHours := float64(t) * timeStep
-				for _, change := range req.FlowRateChanges {
-					if math.Abs(elapsedHours-change.ChangeTimeHours) < timeStep*0.5 {
-						actualFlow = change.NewFlowRate
-						break
-					}
-				}
-			}
-
-			smoothedFlow := p.smoothFlowRate(actualFlow, flowHistory)
-			flowChangeRate := p.calculateFlowChangeRate(actualFlow, flowHistory)
-
-			adaptiveMixing, adaptiveDispersion := p.calculateAdaptiveParameters(flowChangeRate)
-
-			model.mixingEfficiency = adaptiveMixing
-			model.axialDispersion = adaptiveDispersion
-
-			flowHistory = append(flowHistory, actualFlow)
-			if len(flowHistory) > responseSteps {
-				flowHistory = flowHistory[1:]
-			}
-
-			adaptiveReq := req
-			adaptiveReq.UnloadingRate = smoothedFlow
-
-			p.advanceTimeStep(model, initialState, adaptiveReq, timeStep, t)
+			newState := make([]LayerState, nLayers)
+			copy(newState, currentState)
+			p.advanceTimeStep(model, newState, req, timeStep, t)
+			currentState = newState
 		}
 	}
 
@@ -193,6 +488,7 @@ func (p *UnloadingPredictor) predictUnloading(
 		OptimalPumpOnTime:  optimalPumpOnTime,
 		RolloverRisk:       rolloverRisk,
 		PredictedAt:        time.Now(),
+		AsyncComputed:      false,
 	}
 }
 

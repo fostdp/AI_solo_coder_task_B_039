@@ -1,4 +1,4 @@
-package bog_diagnostic
+package bog_diagnoser
 
 import (
 	"context"
@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-type BOGDiagnosticService struct {
+type BOGDiagnoserService struct {
 	cfg         *config.Config
 	db          *database.DB
 	requestChan <-chan messages.BOGBatch
@@ -46,12 +46,12 @@ type TreeNode struct {
 	size         int
 }
 
-func NewBOGDiagnosticService(
+func NewBOGDiagnoserService(
 	cfg *config.Config,
 	db *database.DB,
 	requestChan <-chan messages.BOGBatch,
 	resultChan chan<- messages.BOGDiagnosticResult,
-) *BOGDiagnosticService {
+) *BOGDiagnoserService {
 	params := &config.BOGDiagnosticParams{
 		ContaminationRate:     0.1,
 		NormalVibrationRange:  [2]float64{0.5, 3.0},
@@ -80,7 +80,7 @@ func NewBOGDiagnosticService(
 		params = &cfg.ModelParams.BOGDiagnostic
 	}
 
-	return &BOGDiagnosticService{
+	return &BOGDiagnoserService{
 		cfg:         cfg,
 		db:          db,
 		requestChan: requestChan,
@@ -228,14 +228,14 @@ func (f *IsolationForest) harmonicNumber(n float64) float64 {
 	return math.Log(n) + 0.5772156649
 }
 
-func (s *BOGDiagnosticService) Start(ctx context.Context) {
+func (s *BOGDiagnoserService) Start(ctx context.Context) {
 	go s.processLoop(ctx)
 	if s.cfg.BOGDiagnostic.AutoDiagnose {
 		go s.scheduledDiagnostics(ctx)
 	}
 }
 
-func (s *BOGDiagnosticService) processLoop(ctx context.Context) {
+func (s *BOGDiagnoserService) processLoop(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -246,7 +246,7 @@ func (s *BOGDiagnosticService) processLoop(ctx context.Context) {
 	}
 }
 
-func (s *BOGDiagnosticService) scheduledDiagnostics(ctx context.Context) {
+func (s *BOGDiagnoserService) scheduledDiagnostics(ctx context.Context) {
 	ticker := time.NewTicker(time.Duration(s.cfg.BOGDiagnostic.IntervalSec) * time.Second)
 	defer ticker.Stop()
 
@@ -260,7 +260,7 @@ func (s *BOGDiagnosticService) scheduledDiagnostics(ctx context.Context) {
 	}
 }
 
-func (s *BOGDiagnosticService) processBatch(ctx context.Context, batch messages.BOGBatch) {
+func (s *BOGDiagnoserService) processBatch(ctx context.Context, batch messages.BOGBatch) {
 	s.ensureModelTrained(ctx, batch.TankID)
 
 	for _, bogData := range batch.Data {
@@ -279,7 +279,7 @@ func (s *BOGDiagnosticService) processBatch(ctx context.Context, batch messages.
 	}
 }
 
-func (s *BOGDiagnosticService) runDiagnosticsForAllTanks(ctx context.Context) {
+func (s *BOGDiagnoserService) runDiagnosticsForAllTanks(ctx context.Context) {
 	for tankID := 1; tankID <= s.cfg.Modbus.TankCount; tankID++ {
 		history, err := s.db.GetBOGHistory(ctx, tankID, s.modelParams.HistoryWindowHours)
 		if err != nil || len(history) == 0 {
@@ -314,7 +314,7 @@ func (s *BOGDiagnosticService) runDiagnosticsForAllTanks(ctx context.Context) {
 	}
 }
 
-func (s *BOGDiagnosticService) diagnoseCompressor(
+func (s *BOGDiagnoserService) diagnoseCompressor(
 	ctx context.Context,
 	tankID int,
 	data models.BOGCompressorData,
@@ -361,7 +361,7 @@ func (s *BOGDiagnosticService) diagnoseCompressor(
 	}
 }
 
-func (s *BOGDiagnosticService) extractFeatures(
+func (s *BOGDiagnoserService) extractFeatures(
 	data models.BOGCompressorData,
 	history []models.BOGCompressorData,
 ) []float64 {
@@ -413,7 +413,7 @@ func (s *BOGDiagnosticService) extractFeatures(
 	return features
 }
 
-func (s *BOGDiagnosticService) normalize(value, min, max float64) float64 {
+func (s *BOGDiagnoserService) normalize(value, min, max float64) float64 {
 	rangeVal := max - min
 	if rangeVal == 0 {
 		return 0.5
@@ -421,13 +421,13 @@ func (s *BOGDiagnosticService) normalize(value, min, max float64) float64 {
 	return (value - min) / rangeVal
 }
 
-func (s *BOGDiagnosticService) estimateLoad(data models.BOGCompressorData) float64 {
+func (s *BOGDiagnoserService) estimateLoad(data models.BOGCompressorData) float64 {
 	currLoad := s.normalize(data.MotorCurrent, s.modelParams.NormalCurrentRange[0], s.modelParams.RatedCurrent)
 	pressLoad := s.normalize(data.DischargePressure, 0.1, s.modelParams.RatedPressure)
 	return math.Min(1.0, (currLoad*0.6+pressLoad*0.4))
 }
 
-func (s *BOGDiagnosticService) isSteadyState(history []models.BOGCompressorData) (bool, float64) {
+func (s *BOGDiagnoserService) isSteadyState(history []models.BOGCompressorData) (bool, float64) {
 	n := s.modelParams.SteadyStateWindow
 	if n > len(history) {
 		n = len(history)
@@ -463,7 +463,7 @@ func (s *BOGDiagnosticService) isSteadyState(history []models.BOGCompressorData)
 	return currStable && pressStable, stabilityScore
 }
 
-func (s *BOGDiagnosticService) normalizeByLoad(
+func (s *BOGDiagnoserService) normalizeByLoad(
 	vibration, current, pressure float64,
 	load float64,
 ) (float64, float64, float64) {
@@ -484,7 +484,7 @@ func (s *BOGDiagnosticService) normalizeByLoad(
 	return normVib, normCurr, normPress
 }
 
-func (s *BOGDiagnosticService) calculateTrend(history []models.BOGCompressorData, metric string) float64 {
+func (s *BOGDiagnoserService) calculateTrend(history []models.BOGCompressorData, metric string) float64 {
 	n := s.modelParams.TrendWindowPoints
 	if n > len(history) {
 		n = len(history)
@@ -515,7 +515,7 @@ func (s *BOGDiagnosticService) calculateTrend(history []models.BOGCompressorData
 	return slope
 }
 
-func (s *BOGDiagnosticService) classifyFaultType(
+func (s *BOGDiagnoserService) classifyFaultType(
 	features []float64,
 	anomalyScore float64,
 	vibTrend, currTrend float64,
@@ -557,7 +557,7 @@ func (s *BOGDiagnosticService) classifyFaultType(
 	return "normal"
 }
 
-func (s *BOGDiagnosticService) calculateConfidence(
+func (s *BOGDiagnoserService) calculateConfidence(
 	anomalyScore float64,
 	features []float64,
 ) float64 {
@@ -572,7 +572,7 @@ func (s *BOGDiagnosticService) calculateConfidence(
 	return math.Min(0.99, math.Max(0.01, confidence))
 }
 
-func (s *BOGDiagnosticService) estimateRemainingLife(
+func (s *BOGDiagnoserService) estimateRemainingLife(
 	anomalyScore float64,
 	vibTrend, currTrend float64,
 ) float64 {
@@ -594,7 +594,7 @@ func (s *BOGDiagnosticService) estimateRemainingLife(
 	return math.Max(0, math.Min(8760, remaining))
 }
 
-func (s *BOGDiagnosticService) generateRecommendation(
+func (s *BOGDiagnoserService) generateRecommendation(
 	isAnomaly bool,
 	anomalyType string,
 	anomalyScore float64,
@@ -637,7 +637,7 @@ func (s *BOGDiagnosticService) generateRecommendation(
 	return rec
 }
 
-func (s *BOGDiagnosticService) ensureModelTrained(ctx context.Context, tankID int) {
+func (s *BOGDiagnoserService) ensureModelTrained(ctx context.Context, tankID int) {
 	if s.iforest.trees[0] != nil {
 		return
 	}
@@ -651,7 +651,7 @@ func (s *BOGDiagnosticService) ensureModelTrained(ctx context.Context, tankID in
 	s.ensureModelTrainedWithData(ctx, tankID, history)
 }
 
-func (s *BOGDiagnosticService) ensureModelTrainedWithData(
+func (s *BOGDiagnoserService) ensureModelTrainedWithData(
 	ctx context.Context,
 	tankID int,
 	history []models.BOGCompressorData,
@@ -680,7 +680,7 @@ func (s *BOGDiagnosticService) ensureModelTrainedWithData(
 	}
 }
 
-func (s *BOGDiagnosticService) trainWithDefaultData() {
+func (s *BOGDiagnoserService) trainWithDefaultData() {
 	nSamples := 500
 	nFeatures := 8
 	X := make([][]float64, nSamples)
@@ -696,7 +696,7 @@ func (s *BOGDiagnosticService) trainWithDefaultData() {
 	s.iforest.Fit(X)
 }
 
-func (s *BOGDiagnosticService) saveDiagnostic(ctx context.Context, result messages.BOGDiagnosticResult) {
+func (s *BOGDiagnoserService) saveDiagnostic(ctx context.Context, result messages.BOGDiagnosticResult) {
 	diag := &models.BOGDiagnostic{
 		Time:           result.DiagnosedAt,
 		TankID:         result.TankID,
@@ -715,7 +715,7 @@ func (s *BOGDiagnosticService) saveDiagnostic(ctx context.Context, result messag
 	}
 }
 
-func (s *BOGDiagnosticService) RunManualDiagnostic(
+func (s *BOGDiagnoserService) RunManualDiagnostic(
 	ctx context.Context,
 	tankID, compressorID, historyHours int,
 ) (*messages.BOGDiagnosticResult, error) {

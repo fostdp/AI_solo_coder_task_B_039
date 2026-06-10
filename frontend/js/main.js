@@ -18,6 +18,9 @@ function initFeatureDashboards() {
         FeatureDashboards.init();
         FeatureDashboards.setCurrentTank(currentTankId);
     }
+    if (typeof MultiTankScheduler !== 'undefined') {
+        MultiTankScheduler.init(currentTankId);
+    }
 }
 
 function bindViewButtons() {
@@ -95,6 +98,9 @@ function selectTank(tankId) {
         FeatureDashboards.setCurrentTank(tankId);
         FeatureDashboards.refreshAll();
     }
+    if (typeof MultiTankScheduler !== 'undefined') {
+        MultiTankScheduler.setCurrentTank(tankId);
+    }
 
     if (typeof Tank3DViewer !== 'undefined') {
         Tank3DViewer.switchTank(tankId);
@@ -116,6 +122,10 @@ function refreshAllData() {
 
     if (typeof RiskDashboard !== 'undefined') {
         RiskDashboard.loadTankData(currentTankId);
+    }
+
+    if (typeof MultiTankScheduler !== 'undefined') {
+        MultiTankScheduler.refresh();
     }
 
     loadActiveAlarms();

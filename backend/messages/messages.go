@@ -161,6 +161,7 @@ type UnloadingPrediction struct {
 	RolloverRisk        float64
 	PredictedAt         time.Time
 	ErrorMessage        string
+	AsyncComputed       bool
 }
 
 type SchedulerRequest struct {
@@ -186,6 +187,7 @@ type ScheduleResult struct {
 	ErrorMessage      string
 	Decomposed        bool
 	SubproblemCount   int
+	AsyncOptimized    bool
 }
 
 type PumpOperation struct {

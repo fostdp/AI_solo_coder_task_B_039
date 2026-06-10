@@ -1,4 +1,4 @@
-package heat_leak
+package insulation_monitor
 
 import (
 	"math"
@@ -62,7 +62,7 @@ func TestInverseSolverLeastSquares(t *testing.T) {
 
 func TestConductivityInversionAccuracy(t *testing.T) {
 	cfg := testutils.NewTestConfig()
-	evaluator := &HeatLeakEvaluator{
+	evaluator := &InsulationMonitorService{
 		cfg:         cfg,
 		modelParams: &cfg.ModelParams.HeatLeak,
 		calibration: make(map[int]float64),
@@ -135,7 +135,7 @@ func TestConductivityInversionAccuracy(t *testing.T) {
 
 func TestHeatLeakLocalization(t *testing.T) {
 	cfg := testutils.NewTestConfig()
-	evaluator := &HeatLeakEvaluator{
+	evaluator := &InsulationMonitorService{
 		cfg:         cfg,
 		modelParams: &cfg.ModelParams.HeatLeak,
 		calibration: make(map[int]float64),
@@ -217,7 +217,7 @@ func TestHeatLeakLocalization(t *testing.T) {
 
 func TestLeakLocalizationEdgeCases(t *testing.T) {
 	cfg := testutils.NewTestConfig()
-	evaluator := &HeatLeakEvaluator{
+	evaluator := &InsulationMonitorService{
 		cfg:         cfg,
 		modelParams: &cfg.ModelParams.HeatLeak,
 		calibration: make(map[int]float64),
@@ -283,7 +283,7 @@ func TestLeakLocalizationEdgeCases(t *testing.T) {
 
 func TestWarningThreshold(t *testing.T) {
 	cfg := testutils.NewTestConfig()
-	evaluator := &HeatLeakEvaluator{
+	evaluator := &InsulationMonitorService{
 		cfg:         cfg,
 		modelParams: &cfg.ModelParams.HeatLeak,
 		calibration: make(map[int]float64),
@@ -323,7 +323,7 @@ func TestWarningThreshold(t *testing.T) {
 
 func TestInsulationPerformanceCalculation(t *testing.T) {
 	cfg := testutils.NewTestConfig()
-	evaluator := &HeatLeakEvaluator{
+	evaluator := &InsulationMonitorService{
 		cfg:         cfg,
 		modelParams: &cfg.ModelParams.HeatLeak,
 		calibration: make(map[int]float64),
@@ -354,7 +354,7 @@ func TestInsulationPerformanceCalculation(t *testing.T) {
 
 func TestHeatLeakRateCalculation(t *testing.T) {
 	cfg := testutils.NewTestConfig()
-	evaluator := &HeatLeakEvaluator{
+	evaluator := &InsulationMonitorService{
 		cfg:         cfg,
 		modelParams: &cfg.ModelParams.HeatLeak,
 		calibration: make(map[int]float64),
@@ -391,7 +391,7 @@ func TestHeatLeakRateCalculation(t *testing.T) {
 
 func TestTemperatureTrendCalculation(t *testing.T) {
 	cfg := testutils.NewTestConfig()
-	evaluator := &HeatLeakEvaluator{
+	evaluator := &InsulationMonitorService{
 		cfg:         cfg,
 		modelParams: &cfg.ModelParams.HeatLeak,
 	}
@@ -443,7 +443,7 @@ func TestTemperatureTrendCalculation(t *testing.T) {
 
 func TestEvaluateHeatLeakEndToEnd(t *testing.T) {
 	cfg := testutils.NewTestConfig()
-	evaluator := &HeatLeakEvaluator{
+	evaluator := &InsulationMonitorService{
 		cfg:         cfg,
 		modelParams: &cfg.ModelParams.HeatLeak,
 		calibration: make(map[int]float64),
@@ -504,7 +504,7 @@ func TestEvaluateHeatLeakEndToEnd(t *testing.T) {
 			}
 
 			startTime := time.Now()
-			result := evaluator.evaluateHeatLeak(nil, 1, history, 25.0)
+			result := evaluator.evaluateInsulation(nil, 1, history, 25.0)
 			duration := time.Since(startTime)
 
 			t.Logf("%s: K=%.6f, performance=%.4f, warning=%v, regions=%v, time=%v",
@@ -543,7 +543,7 @@ func TestEvaluateHeatLeakEndToEnd(t *testing.T) {
 
 func TestBoundaryConditions(t *testing.T) {
 	cfg := testutils.NewTestConfig()
-	evaluator := &HeatLeakEvaluator{
+	evaluator := &InsulationMonitorService{
 		cfg:         cfg,
 		modelParams: &cfg.ModelParams.HeatLeak,
 		calibration: make(map[int]float64),
@@ -553,7 +553,7 @@ func TestBoundaryConditions(t *testing.T) {
 
 	t.Run("Insufficient data", func(t *testing.T) {
 		history := testutils.GenerateNormalLayerData(20, 5, -160.0)
-		result := evaluator.evaluateHeatLeak(nil, 1, history, 25.0)
+		result := evaluator.evaluateInsulation(nil, 1, history, 25.0)
 
 		if result.ErrorMessage == "" {
 			t.Error("Expected error for insufficient data")
@@ -565,7 +565,7 @@ func TestBoundaryConditions(t *testing.T) {
 		nTimeSteps := 48
 		history := testutils.GenerateHeatLeakData(nLayers, nTimeSteps, []int{10}, 0.5)
 
-		result := evaluator.evaluateHeatLeak(nil, 1, history, 25.0)
+		result := evaluator.evaluateInsulation(nil, 1, history, 25.0)
 
 		thresholdPerformance := boundaries["insulation_performance"]["warning_start"]
 		performance := result.InsulationPerformance
@@ -620,7 +620,7 @@ func TestInverseSolverConvergence(t *testing.T) {
 
 func TestDetectAnomalousLayers(t *testing.T) {
 	cfg := testutils.NewTestConfig()
-	evaluator := &HeatLeakEvaluator{
+	evaluator := &InsulationMonitorService{
 		cfg:         cfg,
 		modelParams: &cfg.ModelParams.HeatLeak,
 		calibration: make(map[int]float64),
@@ -658,13 +658,13 @@ func TestDetectAnomalousLayers(t *testing.T) {
 
 func TestCalibration(t *testing.T) {
 	cfg := testutils.NewTestConfig()
-	evaluator := &HeatLeakEvaluator{
+	evaluator := &InsulationMonitorService{
 		cfg:         cfg,
 		modelParams: &cfg.ModelParams.HeatLeak,
 		calibration: make(map[int]float64),
 	}
 
-	evaluator.setCalibration(1, 0.026)
+	evaluator.Calibrate(1, 0.026)
 
 	k := evaluator.getCalibratedK(1)
 	if math.Abs(k - 0.026) > 1e-9 {
@@ -679,7 +679,7 @@ func TestCalibration(t *testing.T) {
 
 func TestPerformanceBenchmark(t *testing.T) {
 	cfg := testutils.NewTestConfig()
-	evaluator := &HeatLeakEvaluator{
+	evaluator := &InsulationMonitorService{
 		cfg:         cfg,
 		modelParams: &cfg.ModelParams.HeatLeak,
 		calibration: make(map[int]float64),
@@ -694,7 +694,7 @@ func TestPerformanceBenchmark(t *testing.T) {
 	startTime := time.Now()
 
 	for i := 0; i < nEvaluations; i++ {
-		_ = evaluator.evaluateHeatLeak(nil, 1, history, 25.0)
+		_ = evaluator.evaluateInsulation(nil, 1, history, 25.0)
 	}
 
 	duration := time.Since(startTime)
@@ -737,7 +737,7 @@ func TestHeatLeakResultFields(t *testing.T) {
 
 func TestRootCause_AmbientTempSuddenChangeStability(t *testing.T) {
 	cfg := testutils.NewTestConfig()
-	evaluator := &HeatLeakEvaluator{
+	evaluator := &InsulationMonitorService{
 		cfg:         cfg,
 		modelParams: &cfg.ModelParams.HeatLeak,
 		calibration: make(map[int]float64),
@@ -748,18 +748,18 @@ func TestRootCause_AmbientTempSuddenChangeStability(t *testing.T) {
 	stableAmbient := 25.0
 
 	stableHistory := testutils.GenerateHeatLeakData(nLayers, nTimeSteps, []int{}, 0.0)
-	stableResult := evaluator.evaluateHeatLeak(nil, 1, stableHistory, stableAmbient)
+	stableResult := evaluator.evaluateInsulation(nil, 1, stableHistory, stableAmbient)
 
 	suddenChangeHistory := generateAmbientSuddenChangeData(nLayers, nTimeSteps, stableAmbient)
 	suddenChangeAmbient := 35.0
 
 	evaluator.modelParams.AdaptiveRegularizationOn = false
 	evaluator.modelParams.SlidingWindowSize = 1
-	resultWithoutReg := evaluator.evaluateHeatLeak(nil, 1, suddenChangeHistory, suddenChangeAmbient)
+	resultWithoutReg := evaluator.evaluateInsulation(nil, 1, suddenChangeHistory, suddenChangeAmbient)
 
 	evaluator.modelParams.AdaptiveRegularizationOn = true
 	evaluator.modelParams.SlidingWindowSize = 6
-	resultWithReg := evaluator.evaluateHeatLeak(nil, 1, suddenChangeHistory, suddenChangeAmbient)
+	resultWithReg := evaluator.evaluateInsulation(nil, 1, suddenChangeHistory, suddenChangeAmbient)
 
 	t.Logf("Stable condition K: %.6f", stableResult.EquivalentConductivity)
 	t.Logf("Without regularization K: %.6f", resultWithoutReg.EquivalentConductivity)
@@ -784,7 +784,7 @@ func TestRootCause_AmbientTempSuddenChangeStability(t *testing.T) {
 
 func TestRootCause_SlidingWindowSmoothing(t *testing.T) {
 	cfg := testutils.NewTestConfig()
-	evaluator := &HeatLeakEvaluator{
+	evaluator := &InsulationMonitorService{
 		cfg:         cfg,
 		modelParams: &cfg.ModelParams.HeatLeak,
 		calibration: make(map[int]float64),
@@ -797,10 +797,10 @@ func TestRootCause_SlidingWindowSmoothing(t *testing.T) {
 	noisyTemps := generateNoisyTemperatureData(nLayers, nTimeSteps, baseTemp)
 
 	evaluator.modelParams.SlidingWindowSize = 1
-	resultNoSmooth := evaluator.evaluateHeatLeak(nil, 1, noisyTemps, 25.0)
+	resultNoSmooth := evaluator.evaluateInsulation(nil, 1, noisyTemps, 25.0)
 
 	evaluator.modelParams.SlidingWindowSize = 6
-	resultSmooth := evaluator.evaluateHeatLeak(nil, 1, noisyTemps, 25.0)
+	resultSmooth := evaluator.evaluateInsulation(nil, 1, noisyTemps, 25.0)
 
 	t.Logf("Without smoothing K: %.6f, HeatLeakRate: %.2f", resultNoSmooth.EquivalentConductivity, resultNoSmooth.HeatLeakRate)
 	t.Logf("With smoothing K: %.6f, HeatLeakRate: %.2f", resultSmooth.EquivalentConductivity, resultSmooth.HeatLeakRate)
@@ -824,7 +824,7 @@ func TestRootCause_SlidingWindowSmoothing(t *testing.T) {
 
 func TestRootCause_AdaptiveRegularization(t *testing.T) {
 	cfg := testutils.NewTestConfig()
-	evaluator := &HeatLeakEvaluator{
+	evaluator := &InsulationMonitorService{
 		cfg:         cfg,
 		modelParams: &cfg.ModelParams.HeatLeak,
 		calibration: make(map[int]float64),

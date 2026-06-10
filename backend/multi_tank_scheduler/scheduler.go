@@ -13,13 +13,19 @@ import (
 	"time"
 )
 
+const (
+	DefaultOptimizerPoolSize = 2
+	MaxOptimizationQueue     = 10
+)
+
 type MultiTankScheduler struct {
-	cfg         *config.Config
-	db          *database.DB
-	requestChan <-chan messages.SchedulerRequest
-	resultChan  chan<- messages.ScheduleResult
-	mu          sync.RWMutex
-	modelParams *config.SchedulerParams
+	cfg           *config.Config
+	db            *database.DB
+	requestChan   <-chan messages.SchedulerRequest
+	resultChan    chan<- messages.ScheduleResult
+	mu            sync.RWMutex
+	modelParams   *config.SchedulerParams
+	optimizerPool *OptimizerWorkerPool
 }
 
 type LPSolver struct {
@@ -36,6 +42,25 @@ type OptimizationObjective struct {
 	EvaporationLossCost float64
 	ElectricityCost     float64
 	TotalCost           float64
+}
+
+type OptimizationTask struct {
+	ctx        context.Context
+	states     []messages.TankStateForScheduler
+	resultChan chan *OptimizationResult
+}
+
+type OptimizationResult struct {
+	ScheduleResult *messages.ScheduleResult
+	Error          error
+}
+
+type OptimizerWorkerPool struct {
+	taskChan    chan *OptimizationTask
+	workerCount int
+	wg          sync.WaitGroup
+	mu          sync.RWMutex
+	running     bool
 }
 
 func NewMultiTankScheduler(
@@ -66,12 +91,15 @@ func NewMultiTankScheduler(
 		params = &cfg.ModelParams.Scheduler
 	}
 
+	optimizerPool := NewOptimizerWorkerPool(DefaultOptimizerPoolSize)
+
 	scheduler := &MultiTankScheduler{
-		cfg:         cfg,
-		db:          db,
-		requestChan: requestChan,
-		resultChan:  resultChan,
-		modelParams: params,
+		cfg:           cfg,
+		db:            db,
+		requestChan:   requestChan,
+		resultChan:    resultChan,
+		modelParams:   params,
+		optimizerPool: optimizerPool,
 	}
 
 	scheduler.ensureCompressorConfig(cfg.Modbus.TankCount, cfg.Modbus.Register.CompressorsPerTank)
@@ -79,7 +107,161 @@ func NewMultiTankScheduler(
 	return scheduler
 }
 
+func NewOptimizerWorkerPool(workerCount int) *OptimizerWorkerPool {
+	if workerCount <= 0 {
+		workerCount = DefaultOptimizerPoolSize
+	}
+	return &OptimizerWorkerPool{
+		taskChan:    make(chan *OptimizationTask, MaxOptimizationQueue),
+		workerCount: workerCount,
+		running:     false,
+	}
+}
+
+func (pool *OptimizerWorkerPool) Start(ctx context.Context) {
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+
+	if pool.running {
+		return
+	}
+	pool.running = true
+
+	for i := 0; i < pool.workerCount; i++ {
+		pool.wg.Add(1)
+		go pool.worker(ctx, i)
+	}
+}
+
+func (pool *OptimizerWorkerPool) Stop() {
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+
+	if !pool.running {
+		return
+	}
+	pool.running = false
+	close(pool.taskChan)
+	pool.wg.Wait()
+}
+
+func (pool *OptimizerWorkerPool) Submit(task *OptimizationTask) bool {
+	pool.mu.RLock()
+	defer pool.mu.RUnlock()
+
+	if !pool.running {
+		return false
+	}
+
+	select {
+	case pool.taskChan <- task:
+		return true
+	default:
+		return false
+	}
+}
+
+func (pool *OptimizerWorkerPool) worker(ctx context.Context, workerID int) {
+	defer pool.wg.Done()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case task, ok := <-pool.taskChan:
+			if !ok {
+				return
+			}
+			result := pool.executeOptimization(task)
+			select {
+			case task.resultChan <- result:
+			case <-task.ctx.Done():
+			case <-ctx.Done():
+			}
+		}
+	}
+}
+
+func (pool *OptimizerWorkerPool) executeOptimization(task *OptimizationTask) *OptimizationResult {
+	select {
+	case <-task.ctx.Done():
+		return &OptimizationResult{Error: task.ctx.Err()}
+	default:
+	}
+
+	scheduler, ok := pool.extractScheduler()
+	if !ok {
+		return &OptimizationResult{Error: fmt.Errorf("scheduler not available")}
+	}
+
+	result := scheduler.executeOptimization(task.ctx, task.states)
+	return &OptimizationResult{ScheduleResult: &result, Error: nil}
+}
+
+var schedulerReference struct {
+	sync.RWMutex
+	scheduler *MultiTankScheduler
+}
+
+func (pool *OptimizerWorkerPool) setSchedulerReference(s *MultiTankScheduler) {
+	schedulerReference.Lock()
+	defer schedulerReference.Unlock()
+	schedulerReference.scheduler = s
+}
+
+func (pool *OptimizerWorkerPool) extractScheduler() (*MultiTankScheduler, bool) {
+	schedulerReference.RLock()
+	defer schedulerReference.RUnlock()
+	return schedulerReference.scheduler, schedulerReference.scheduler != nil
+}
+
+func (s *MultiTankScheduler) executeOptimization(
+	ctx context.Context,
+	states []messages.TankStateForScheduler,
+) messages.ScheduleResult {
+	if len(states) == 0 {
+		return messages.ScheduleResult{
+			OptimizedAt:  time.Now(),
+			ErrorMessage: "no tank states available",
+			AsyncOptimized: true,
+		}
+	}
+
+	s.ensureCompressorConfig(len(states), 2)
+
+	useDecomposition := s.modelParams.DecompositionOn &&
+		len(states) > s.modelParams.MaxTanksPerSubproblem
+
+	if useDecomposition {
+		result := s.decomposeAndOptimize(ctx, states)
+		result.AsyncOptimized = true
+		return result
+	}
+
+	compressorLoads := s.optimizeCompressorLoads(states)
+	pumpOperations := s.optimizePumpOperations(states)
+	evaporationLoss := s.calculateEvaporationLoss(states, compressorLoads)
+
+	result := messages.ScheduleResult{
+		CompressorLoads: make(map[string]float64),
+		PumpOperations:  pumpOperations,
+		EvaporationLoss: evaporationLoss,
+		OptimizedAt:     time.Now(),
+		Decomposed:      false,
+		SubproblemCount: 1,
+		AsyncOptimized:  true,
+	}
+
+	for key, load := range compressorLoads {
+		result.CompressorLoads[key] = load
+	}
+
+	return result
+}
+
 func (s *MultiTankScheduler) Start(ctx context.Context) {
+	s.optimizerPool.setSchedulerReference(s)
+	s.optimizerPool.Start(ctx)
 	go s.processLoop(ctx)
 	if s.cfg.Scheduler.AutoOptimize {
 		go s.scheduledOptimization(ctx)
@@ -204,10 +386,46 @@ func (s *MultiTankScheduler) optimizeSchedule(
 	ctx context.Context,
 	states []messages.TankStateForScheduler,
 ) messages.ScheduleResult {
+	resultChan := make(chan *OptimizationResult, 1)
+
+	task := &OptimizationTask{
+		ctx:        ctx,
+		states:     states,
+		resultChan: resultChan,
+	}
+
+	if !s.optimizerPool.Submit(task) {
+		return s.optimizeScheduleFallback(ctx, states)
+	}
+
+	select {
+	case <-ctx.Done():
+		return messages.ScheduleResult{
+			OptimizedAt:  time.Now(),
+			ErrorMessage: "context cancelled",
+			AsyncOptimized: false,
+		}
+	case result := <-resultChan:
+		if result.Error != nil {
+			return messages.ScheduleResult{
+				OptimizedAt:  time.Now(),
+				ErrorMessage: result.Error.Error(),
+				AsyncOptimized: false,
+			}
+		}
+		return *result.ScheduleResult
+	}
+}
+
+func (s *MultiTankScheduler) optimizeScheduleFallback(
+	ctx context.Context,
+	states []messages.TankStateForScheduler,
+) messages.ScheduleResult {
 	if len(states) == 0 {
 		return messages.ScheduleResult{
 			OptimizedAt:  time.Now(),
 			ErrorMessage: "no tank states available",
+			AsyncOptimized: false,
 		}
 	}
 
@@ -217,7 +435,9 @@ func (s *MultiTankScheduler) optimizeSchedule(
 		len(states) > s.modelParams.MaxTanksPerSubproblem
 
 	if useDecomposition {
-		return s.decomposeAndOptimize(ctx, states)
+		result := s.decomposeAndOptimize(ctx, states)
+		result.AsyncOptimized = false
+		return result
 	}
 
 	compressorLoads := s.optimizeCompressorLoads(states)
@@ -231,6 +451,7 @@ func (s *MultiTankScheduler) optimizeSchedule(
 		OptimizedAt:     time.Now(),
 		Decomposed:      false,
 		SubproblemCount: 1,
+		AsyncOptimized:  false,
 	}
 
 	for key, load := range compressorLoads {
@@ -649,6 +870,7 @@ func (s *MultiTankScheduler) decomposeAndOptimize(
 		OptimizedAt:     time.Now(),
 		Decomposed:      true,
 		SubproblemCount: len(subproblems),
+		AsyncOptimized:  false,
 	}
 
 	for key, load := range loads {

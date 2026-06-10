@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"lng-monitoring/alarm_forwarder"
 	"lng-monitoring/api"
-	"lng-monitoring/bog_diagnostic"
+	"lng-monitoring/bog_diagnoser"
 	"lng-monitoring/config"
 	"lng-monitoring/database"
-	"lng-monitoring/heat_leak"
+	"lng-monitoring/insulation_monitor"
 	"lng-monitoring/messages"
 	"lng-monitoring/modbus_poller"
 	"lng-monitoring/models"
@@ -170,7 +170,7 @@ func main() {
 	)
 	fmt.Println("Alarm forwarder initialized")
 
-	bogDiagnostic := bog_diagnostic.NewBOGDiagnosticService(
+	bogDiagnostic := bog_diagnoser.NewBOGDiagnoserService(
 		cfg,
 		db,
 		bogBatchChan,
@@ -178,7 +178,7 @@ func main() {
 	)
 	fmt.Println("BOG diagnostic service initialized")
 
-	heatLeakEvaluator := heat_leak.NewHeatLeakEvaluator(
+	heatLeakEvaluator := insulation_monitor.NewInsulationMonitorService(
 		cfg,
 		db,
 		heatLeakRequestChan,

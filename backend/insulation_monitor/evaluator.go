@@ -1,4 +1,4 @@
-package heat_leak
+package insulation_monitor
 
 import (
 	"context"
@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-type HeatLeakEvaluator struct {
+type InsulationMonitorService struct {
 	cfg         *config.Config
 	db          *database.DB
 	requestChan <-chan messages.HeatLeakRequest
@@ -30,12 +30,12 @@ type InverseSolver struct {
 	insulationThickness float64
 }
 
-func NewHeatLeakEvaluator(
+func NewInsulationMonitorService(
 	cfg *config.Config,
 	db *database.DB,
 	requestChan <-chan messages.HeatLeakRequest,
 	resultChan  chan<- messages.HeatLeakResult,
-) *HeatLeakEvaluator {
+) *InsulationMonitorService {
 	params := &config.HeatLeakParams{
 		ReferenceConductivity:    0.025,
 		InsulationThickness:      0.8,
@@ -56,7 +56,7 @@ func NewHeatLeakEvaluator(
 		params = &cfg.ModelParams.HeatLeak
 	}
 
-	return &HeatLeakEvaluator{
+	return &InsulationMonitorService{
 		cfg:         cfg,
 		db:          db,
 		requestChan: requestChan,
@@ -66,14 +66,14 @@ func NewHeatLeakEvaluator(
 	}
 }
 
-func (e *HeatLeakEvaluator) Start(ctx context.Context) {
+func (e *InsulationMonitorService) Start(ctx context.Context) {
 	go e.processLoop(ctx)
 	if e.cfg.HeatLeak.AutoEvaluate {
 		go e.scheduledEvaluations(ctx)
 	}
 }
 
-func (e *HeatLeakEvaluator) processLoop(ctx context.Context) {
+func (e *InsulationMonitorService) processLoop(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -84,7 +84,7 @@ func (e *HeatLeakEvaluator) processLoop(ctx context.Context) {
 	}
 }
 
-func (e *HeatLeakEvaluator) scheduledEvaluations(ctx context.Context) {
+func (e *InsulationMonitorService) scheduledEvaluations(ctx context.Context) {
 	ticker := time.NewTicker(time.Duration(e.cfg.HeatLeak.IntervalSec) * time.Second)
 	defer ticker.Stop()
 
@@ -98,8 +98,8 @@ func (e *HeatLeakEvaluator) scheduledEvaluations(ctx context.Context) {
 	}
 }
 
-func (e *HeatLeakEvaluator) processRequest(ctx context.Context, req messages.HeatLeakRequest) {
-	result := e.evaluateHeatLeak(ctx, req.TankID, req.TemperatureHistory, req.AmbientTemperature)
+func (e *InsulationMonitorService) processRequest(ctx context.Context, req messages.HeatLeakRequest) {
+	result := e.evaluateInsulation(ctx, req.TankID, req.TemperatureHistory, req.AmbientTemperature)
 	select {
 	case <-ctx.Done():
 		return
@@ -109,7 +109,7 @@ func (e *HeatLeakEvaluator) processRequest(ctx context.Context, req messages.Hea
 	go e.saveAssessment(ctx, result)
 }
 
-func (e *HeatLeakEvaluator) evaluateAllTanks(ctx context.Context) {
+func (e *InsulationMonitorService) evaluateAllTanks(ctx context.Context) {
 	ambientTemp, _ := e.db.GetAmbientTemperature(ctx, 1*time.Hour)
 	if ambientTemp == 0 {
 		ambientTemp = e.cfg.HeatLeak.DefaultAmbientTemp
@@ -121,7 +121,7 @@ func (e *HeatLeakEvaluator) evaluateAllTanks(ctx context.Context) {
 			continue
 		}
 
-		result := e.evaluateHeatLeak(ctx, tankID, history, ambientTemp)
+		result := e.evaluateInsulation(ctx, tankID, history, ambientTemp)
 		select {
 		case <-ctx.Done():
 			return
@@ -132,7 +132,7 @@ func (e *HeatLeakEvaluator) evaluateAllTanks(ctx context.Context) {
 	}
 }
 
-func (e *HeatLeakEvaluator) evaluateHeatLeak(
+func (e *InsulationMonitorService) evaluateInsulation(
 	ctx context.Context,
 	tankID int,
 	tempHistory []models.LayerSummary,
@@ -182,7 +182,7 @@ func (e *HeatLeakEvaluator) evaluateHeatLeak(
 	}
 }
 
-func (e *HeatLeakEvaluator) organizeByLayer(history []models.LayerSummary) map[int][]models.LayerSummary {
+func (e *InsulationMonitorService) organizeByLayer(history []models.LayerSummary) map[int][]models.LayerSummary {
 	layerData := make(map[int][]models.LayerSummary)
 	for _, d := range history {
 		layerData[d.Layer] = append(layerData[d.Layer], d)
@@ -190,7 +190,7 @@ func (e *HeatLeakEvaluator) organizeByLayer(history []models.LayerSummary) map[i
 	return layerData
 }
 
-func (e *HeatLeakEvaluator) calculateInnerAverageTemp(layerData map[int][]models.LayerSummary) float64 {
+func (e *InsulationMonitorService) calculateInnerAverageTemp(layerData map[int][]models.LayerSummary) float64 {
 	var totalTemp float64
 	var count int
 	for _, data := range layerData {
@@ -206,7 +206,7 @@ func (e *HeatLeakEvaluator) calculateInnerAverageTemp(layerData map[int][]models
 	return totalTemp / float64(count)
 }
 
-func (e *HeatLeakEvaluator) calculateLayerHeatRates(layerData map[int][]models.LayerSummary) map[int]float64 {
+func (e *InsulationMonitorService) calculateLayerHeatRates(layerData map[int][]models.LayerSummary) map[int]float64 {
 	heatRates := make(map[int]float64)
 	lngDensity := 425.0
 	specificHeat := 2200.0
@@ -231,7 +231,7 @@ func (e *HeatLeakEvaluator) calculateLayerHeatRates(layerData map[int][]models.L
 	return heatRates
 }
 
-func (e *HeatLeakEvaluator) smoothAmbientTemperature(
+func (e *InsulationMonitorService) smoothAmbientTemperature(
 	ambientTemp float64,
 	ambientHistory []float64,
 ) float64 {
@@ -248,7 +248,7 @@ func (e *HeatLeakEvaluator) smoothAmbientTemperature(
 	return smoothed
 }
 
-func (e *HeatLeakEvaluator) slidingWindowSmooth(
+func (e *InsulationMonitorService) slidingWindowSmooth(
 	data []models.LayerSummary,
 ) []models.LayerSummary {
 	windowSize := e.modelParams.SlidingWindowSize
@@ -289,7 +289,7 @@ func (e *HeatLeakEvaluator) slidingWindowSmooth(
 	return smoothed
 }
 
-func (e *HeatLeakEvaluator) calculateAmbientChangeRate(
+func (e *InsulationMonitorService) calculateAmbientChangeRate(
 	ambientHistory []float64,
 ) float64 {
 	if len(ambientHistory) < 2 {
@@ -311,7 +311,7 @@ func (e *HeatLeakEvaluator) calculateAmbientChangeRate(
 	return math.Abs(slope)
 }
 
-func (e *HeatLeakEvaluator) calculateAdaptiveLambda(
+func (e *InsulationMonitorService) calculateAdaptiveLambda(
 	ambientChangeRate float64,
 ) float64 {
 	if !e.modelParams.AdaptiveRegularizationOn {
@@ -327,7 +327,7 @@ func (e *HeatLeakEvaluator) calculateAdaptiveLambda(
 	return math.Min(lambda, e.modelParams.MaxRegularizationLambda)
 }
 
-func (e *HeatLeakEvaluator) calculateTemperatureTrend(data []models.LayerSummary) float64 {
+func (e *InsulationMonitorService) calculateTemperatureTrend(data []models.LayerSummary) float64 {
 	n := len(data)
 	if n < 2 {
 		return 0
@@ -357,7 +357,7 @@ func (e *HeatLeakEvaluator) calculateTemperatureTrend(data []models.LayerSummary
 	return slope
 }
 
-func (e *HeatLeakEvaluator) solveInverseProblem(
+func (e *InsulationMonitorService) solveInverseProblem(
 	layerHeatRates map[int]float64,
 	layerData map[int][]models.LayerSummary,
 	innerTemp, ambientTemp, referenceK float64,
@@ -438,7 +438,7 @@ func (s *InverseSolver) leastSquaresSolve(heatRate, area, deltaT, initialK float
 	return k
 }
 
-func (e *HeatLeakEvaluator) detectAnomalousLayers(
+func (e *InsulationMonitorService) detectAnomalousLayers(
 	layerHeatRates map[int]float64,
 	layerData map[int][]models.LayerSummary,
 ) []int {
@@ -463,7 +463,7 @@ func (e *HeatLeakEvaluator) detectAnomalousLayers(
 	return anomalous
 }
 
-func (e *HeatLeakEvaluator) statistics(data []float64) (float64, float64) {
+func (e *InsulationMonitorService) statistics(data []float64) (float64, float64) {
 	if len(data) == 0 {
 		return 0, 0
 	}
@@ -483,7 +483,7 @@ func (e *HeatLeakEvaluator) statistics(data []float64) (float64, float64) {
 	return mean, math.Sqrt(variance)
 }
 
-func (e *HeatLeakEvaluator) calculateInsulationPerformance(equivalentK, referenceK float64) float64 {
+func (e *InsulationMonitorService) calculateInsulationPerformance(equivalentK, referenceK float64) float64 {
 	if referenceK <= 0 {
 		return 1.0
 	}
@@ -491,7 +491,7 @@ func (e *HeatLeakEvaluator) calculateInsulationPerformance(equivalentK, referenc
 	return math.Max(0, math.Min(1.0, performance))
 }
 
-func (e *HeatLeakEvaluator) calculateTotalHeatLeakRate(equivalentK, innerTemp, ambientTemp float64) float64 {
+func (e *InsulationMonitorService) calculateTotalHeatLeakRate(equivalentK, innerTemp, ambientTemp float64) float64 {
 	area := e.modelParams.SurfaceAreaSqM
 	thickness := e.modelParams.InsulationThickness
 	deltaT := ambientTemp - innerTemp
@@ -504,7 +504,7 @@ func (e *HeatLeakEvaluator) calculateTotalHeatLeakRate(equivalentK, innerTemp, a
 	return math.Min(heatLeakRate, e.modelParams.MaxHeatLoadKW*3600.0)
 }
 
-func (e *HeatLeakEvaluator) getCalibratedK(tankID int) float64 {
+func (e *InsulationMonitorService) getCalibratedK(tankID int) float64 {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
@@ -514,11 +514,11 @@ func (e *HeatLeakEvaluator) getCalibratedK(tankID int) float64 {
 	return e.modelParams.ReferenceConductivity
 }
 
-func (e *HeatLeakEvaluator) getLastCalibrationTime(tankID int) time.Time {
+func (e *InsulationMonitorService) getLastCalibrationTime(tankID int) time.Time {
 	return time.Now().AddDate(0, 0, -30)
 }
 
-func (e *HeatLeakEvaluator) saveAssessment(ctx context.Context, result messages.HeatLeakResult) {
+func (e *InsulationMonitorService) saveAssessment(ctx context.Context, result messages.HeatLeakResult) {
 	ambientTemp, _ := e.db.GetAmbientTemperature(ctx, 1*time.Hour)
 	if ambientTemp == 0 {
 		ambientTemp = e.cfg.HeatLeak.DefaultAmbientTemp
@@ -543,7 +543,7 @@ func (e *HeatLeakEvaluator) saveAssessment(ctx context.Context, result messages.
 	}
 }
 
-func (e *HeatLeakEvaluator) RunManualEvaluation(
+func (e *InsulationMonitorService) RunManualAssessment(
 	ctx context.Context,
 	tankID int,
 	ambientTemp float64,
@@ -564,13 +564,13 @@ func (e *HeatLeakEvaluator) RunManualEvaluation(
 		}
 	}
 
-	result := e.evaluateHeatLeak(ctx, tankID, history, ambientTemp)
+	result := e.evaluateInsulation(ctx, tankID, history, ambientTemp)
 	go e.saveAssessment(ctx, result)
 
 	return &result, nil
 }
 
-func (e *HeatLeakEvaluator) Calibrate(tankID int, referenceK float64) {
+func (e *InsulationMonitorService) Calibrate(tankID int, referenceK float64) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
