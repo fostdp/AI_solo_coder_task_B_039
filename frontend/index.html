@@ -67,6 +67,10 @@
                 <button class="view-btn active" data-view="3d">3D视图</button>
                 <button class="view-btn" data-view="section">剖面图</button>
                 <button class="view-btn" data-view="heatmap">热力图</button>
+                <button class="view-btn" data-view="bog">BOG诊断</button>
+                <button class="view-btn" data-view="heatleak">漏热评估</button>
+                <button class="view-btn" data-view="unloading">卸船预测</button>
+                <button class="view-btn" data-view="schedule">调度优化</button>
                 <div class="spacer"></div>
                 <button class="control-btn" id="refresh-btn">刷新数据</button>
                 <button class="control-btn" id="auto-refresh-toggle" data-active="true">
@@ -75,10 +79,218 @@
                 </button>
             </div>
 
-            <div class="canvas-container">
+            <div class="canvas-container" id="canvas-container">
                 <canvas id="three-canvas"></canvas>
                 <canvas id="overlay-canvas"></canvas>
                 <div id="tank-info-overlay" class="tank-info-overlay"></div>
+            </div>
+
+            <div class="feature-panel hidden" id="bog-panel">
+                <div class="panel-header">
+                    <h3>BOG压缩机故障诊断</h3>
+                    <div class="compressor-selector">
+                        <label>压缩机:</label>
+                        <select id="compressor-select">
+                            <option value="1">1#压缩机</option>
+                            <option value="2">2#压缩机</option>
+                        </select>
+                    </div>
+                    <button class="control-btn" id="run-bog-diagnostic">手动诊断</button>
+                </div>
+                <div class="panel-content">
+                    <div class="diagnostic-summary">
+                        <div class="status-card" id="bog-status-card">
+                            <div class="status-icon" id="bog-status-icon">✓</div>
+                            <div class="status-text">
+                                <div class="status-title" id="bog-status-title">运行正常</div>
+                                <div class="status-subtitle" id="bog-status-subtitle">异常评分: --</div>
+                            </div>
+                        </div>
+                        <div class="metric-grid">
+                            <div class="metric-item">
+                                <div class="metric-label">异常类型</div>
+                                <div class="metric-value" id="bog-anomaly-type">--</div>
+                            </div>
+                            <div class="metric-item">
+                                <div class="metric-label">置信度</div>
+                                <div class="metric-value" id="bog-confidence">--</div>
+                            </div>
+                            <div class="metric-item">
+                                <div class="metric-label">剩余寿命</div>
+                                <div class="metric-value" id="bog-remaining">--</div>
+                            </div>
+                            <div class="metric-item">
+                                <div class="metric-label">诊断时间</div>
+                                <div class="metric-value" id="bog-time">--</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="recommendation-box" id="bog-recommendation">
+                        <h4>维修建议</h4>
+                        <p id="bog-recommendation-text">--</p>
+                    </div>
+                    <div class="chart-container">
+                        <h4>异常评分趋势</h4>
+                        <div id="bog-trend-chart" style="width: 100%; height: 300px;"></div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="feature-panel hidden" id="heatleak-panel">
+                <div class="panel-header">
+                    <h3>储罐漏热在线评估</h3>
+                    <div class="input-group">
+                        <label>环境温度 (℃):</label>
+                        <input type="number" id="ambient-temp-input" value="25" step="0.1">
+                    </div>
+                    <button class="control-btn" id="run-heatleak-eval">手动评估</button>
+                </div>
+                <div class="panel-content">
+                    <div class="diagnostic-summary">
+                        <div class="status-card" id="heatleak-status-card">
+                            <div class="status-icon" id="heatleak-status-icon">✓</div>
+                            <div class="status-text">
+                                <div class="status-title" id="heatleak-status-title">保冷良好</div>
+                                <div class="status-subtitle" id="heatleak-status-subtitle">保冷性能: --</div>
+                            </div>
+                        </div>
+                        <div class="metric-grid">
+                            <div class="metric-item">
+                                <div class="metric-label">等效导热系数</div>
+                                <div class="metric-value" id="heatleak-conductivity">--</div>
+                            </div>
+                            <div class="metric-item">
+                                <div class="metric-label">漏热速率</div>
+                                <div class="metric-value" id="heatleak-rate">--</div>
+                            </div>
+                            <div class="metric-item">
+                                <div class="metric-label">总热负荷</div>
+                                <div class="metric-value" id="heatleak-load">--</div>
+                            </div>
+                            <div class="metric-item">
+                                <div class="metric-label">评估时间</div>
+                                <div class="metric-value" id="heatleak-time">--</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="leak-regions-box" id="leak-regions-box">
+                        <h4>漏热区域</h4>
+                        <div id="leak-regions-list">--</div>
+                    </div>
+                    <div class="chart-container">
+                        <h4>保冷性能趋势</h4>
+                        <div id="heatleak-trend-chart" style="width: 100%; height: 300px;"></div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="feature-panel hidden" id="unloading-panel">
+                <div class="panel-header">
+                    <h3>卸船过程快速预测</h3>
+                    <button class="control-btn" id="show-unloading-form">设置参数</button>
+                </div>
+                <div class="panel-content">
+                    <div class="unloading-form hidden" id="unloading-form">
+                        <div class="form-grid">
+                            <div class="form-item">
+                                <label>卸船速率 (m³/h):</label>
+                                <input type="number" id="unloading-rate" value="800" min="100" max="5000">
+                            </div>
+                            <div class="form-item">
+                                <label>卸船密度 (kg/m³):</label>
+                                <input type="number" id="unloading-density" value="425" min="400" max="460" step="0.1">
+                            </div>
+                            <div class="form-item">
+                                <label>卸船温度 (℃):</label>
+                                <input type="number" id="unloading-temp" value="-160" min="-165" max="-150" step="0.1">
+                            </div>
+                            <div class="form-item">
+                                <label>预计时长 (小时):</label>
+                                <input type="number" id="unloading-duration" value="12" min="1" max="48">
+                            </div>
+                        </div>
+                        <button class="control-btn primary" id="run-unloading-prediction">开始预测</button>
+                    </div>
+                    <div class="prediction-results" id="unloading-results">
+                        <div class="metric-grid">
+                            <div class="metric-item">
+                                <div class="metric-label">最大温差</div>
+                                <div class="metric-value" id="unloading-max-temp">--</div>
+                            </div>
+                            <div class="metric-item">
+                                <div class="metric-label">最大密度差</div>
+                                <div class="metric-value" id="unloading-max-density">--</div>
+                            </div>
+                            <div class="metric-item highlight">
+                                <div class="metric-label">最佳开泵时间</div>
+                                <div class="metric-value" id="unloading-pump-time">--</div>
+                            </div>
+                            <div class="metric-item">
+                                <div class="metric-label">翻滚风险</div>
+                                <div class="metric-value" id="unloading-risk">--</div>
+                            </div>
+                        </div>
+                        <div class="chart-container">
+                            <h4>温度分层预测</h4>
+                            <div id="unloading-temp-chart" style="width: 100%; height: 300px;"></div>
+                        </div>
+                        <div class="chart-container">
+                            <h4>密度分层预测</h4>
+                            <div id="unloading-density-chart" style="width: 100%; height: 300px;"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="feature-panel hidden" id="schedule-panel">
+                <div class="panel-header">
+                    <h3>多罐联合调度优化</h3>
+                    <button class="control-btn" id="run-schedule-optimization">运行优化</button>
+                    <button class="control-btn" id="show-cost-breakdown">成本明细</button>
+                </div>
+                <div class="panel-content">
+                    <div class="schedule-summary">
+                        <div class="metric-grid">
+                            <div class="metric-item highlight">
+                                <div class="metric-label">蒸发损耗 (吨/小时)</div>
+                                <div class="metric-value" id="schedule-evaporation">--</div>
+                            </div>
+                            <div class="metric-item">
+                                <div class="metric-label">优化时间</div>
+                                <div class="metric-value" id="schedule-time">--</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="cost-breakdown hidden" id="cost-breakdown">
+                        <h4>运行成本明细</h4>
+                        <div class="cost-grid">
+                            <div class="cost-item">
+                                <div class="cost-label">蒸发损失成本</div>
+                                <div class="cost-value" id="cost-evaporation">--</div>
+                            </div>
+                            <div class="cost-item">
+                                <div class="cost-label">压缩机电力成本</div>
+                                <div class="cost-value" id="cost-compressor">--</div>
+                            </div>
+                            <div class="cost-item">
+                                <div class="cost-label">泵电力成本</div>
+                                <div class="cost-value" id="cost-pump">--</div>
+                            </div>
+                            <div class="cost-item total">
+                                <div class="cost-label">总运行成本</div>
+                                <div class="cost-value" id="cost-total">--</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="compressor-loads">
+                        <h4>压缩机负载分配 (%)</h4>
+                        <div id="compressor-loads-grid" class="compressor-grid"></div>
+                    </div>
+                    <div class="pump-operations">
+                        <h4>低压泵运行计划</h4>
+                        <div id="pump-operations-list" class="pump-list"></div>
+                    </div>
+                </div>
             </div>
 
             <div class="legend-panel">
@@ -129,5 +341,7 @@
     <script src="js/visualization.js"></script>
     <script src="js/tank_3d_viewer.js"></script>
     <script src="js/risk_dashboard.js"></script>
+    <script src="js/feature_dashboards.js"></script>
+    <script src="js/main.js"></script>
 </body>
 </html>

@@ -218,5 +218,122 @@ INSERT INTO users (username, password_hash, role) VALUES
 ('admin', '$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy', 'admin'),
 ('operator', '$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy', 'operator');
 
+-- BOG压缩机故障诊断结果表
+CREATE TABLE IF NOT EXISTS bog_diagnostic (
+    time TIMESTAMPTZ NOT NULL,
+    tank_id INTEGER NOT NULL REFERENCES tanks(tank_id),
+    compressor_id INTEGER NOT NULL,
+    anomaly_score NUMERIC(8,4) NOT NULL,
+    is_anomaly BOOLEAN NOT NULL DEFAULT FALSE,
+    anomaly_type VARCHAR(50),
+    confidence NUMERIC(8,4),
+    remaining_hours NUMERIC(10,4),
+    recommendation VARCHAR(500),
+    vibration_trend NUMERIC(8,4),
+    current_trend NUMERIC(8,4),
+    model_version VARCHAR(20) NOT NULL DEFAULT '1.0',
+    CONSTRAINT pk_bog_diagnostic PRIMARY KEY (time, tank_id, compressor_id)
+);
+
+SELECT create_hypertable('bog_diagnostic', 'time',
+    chunk_time_interval => INTERVAL '1 day',
+    if_not_exists => TRUE);
+
+CREATE INDEX IF NOT EXISTS idx_bog_diagnostic_tank_time ON bog_diagnostic (tank_id, compressor_id, time DESC);
+CREATE INDEX IF NOT EXISTS idx_bog_diagnostic_anomaly ON bog_diagnostic (is_anomaly, time DESC);
+
+-- 储罐漏热评估结果表
+CREATE TABLE IF NOT EXISTS heat_leak_assessment (
+    time TIMESTAMPTZ NOT NULL,
+    tank_id INTEGER NOT NULL REFERENCES tanks(tank_id),
+    equivalent_conductivity NUMERIC(10,6) NOT NULL,
+    insulation_performance NUMERIC(8,4) NOT NULL,
+    heat_leak_rate NUMERIC(10,4) NOT NULL,
+    leak_regions INTEGER[],
+    is_warning BOOLEAN NOT NULL DEFAULT FALSE,
+    total_heat_load_kw NUMERIC(10,4) NOT NULL,
+    ambient_temp NUMERIC(8,4),
+    inner_temp NUMERIC(8,4),
+    model_version VARCHAR(20) NOT NULL DEFAULT '1.0',
+    CONSTRAINT pk_heat_leak_assessment PRIMARY KEY (time, tank_id)
+);
+
+SELECT create_hypertable('heat_leak_assessment', 'time',
+    chunk_time_interval => INTERVAL '1 day',
+    if_not_exists => TRUE);
+
+CREATE INDEX IF NOT EXISTS idx_heat_leak_tank_time ON heat_leak_assessment (tank_id, time DESC);
+CREATE INDEX IF NOT EXISTS idx_heat_leak_warning ON heat_leak_assessment (is_warning, time DESC);
+
+-- 卸船预测结果表
+CREATE TABLE IF NOT EXISTS unloading_prediction (
+    time TIMESTAMPTZ NOT NULL,
+    tank_id INTEGER NOT NULL REFERENCES tanks(tank_id),
+    unloading_rate NUMERIC(12,4) NOT NULL,
+    unloading_density NUMERIC(10,4) NOT NULL,
+    unloading_temp NUMERIC(8,4) NOT NULL,
+    estimated_duration NUMERIC(8,4) NOT NULL,
+    max_temp_diff NUMERIC(8,4) NOT NULL,
+    max_density_diff NUMERIC(10,4) NOT NULL,
+    optimal_pump_on_time NUMERIC(8,4),
+    rollover_risk NUMERIC(8,4) NOT NULL,
+    time_steps NUMERIC(8,4)[],
+    predicted_temps NUMERIC(8,4)[][],
+    predicted_densities NUMERIC(10,4)[][],
+    model_version VARCHAR(20) NOT NULL DEFAULT '1.0',
+    CONSTRAINT pk_unloading_prediction PRIMARY KEY (time, tank_id)
+);
+
+SELECT create_hypertable('unloading_prediction', 'time',
+    chunk_time_interval => INTERVAL '1 day',
+    if_not_exists => TRUE);
+
+CREATE INDEX IF NOT EXISTS idx_unloading_tank_time ON unloading_prediction (tank_id, time DESC);
+
+-- 多罐联合调度结果表
+CREATE TABLE IF NOT EXISTS multi_tank_schedule (
+    time TIMESTAMPTZ NOT NULL,
+    compressor_loads JSONB NOT NULL,
+    pump_operations JSONB,
+    evaporation_loss_kg NUMERIC(12,4) NOT NULL,
+    evaporation_loss_m3 NUMERIC(12,4) NOT NULL,
+    objective_value NUMERIC(12,4),
+    optimization_status VARCHAR(50) NOT NULL DEFAULT 'OPTIMAL',
+    model_version VARCHAR(20) NOT NULL DEFAULT '1.0',
+    CONSTRAINT pk_multi_tank_schedule PRIMARY KEY (time)
+);
+
+SELECT create_hypertable('multi_tank_schedule', 'time',
+    chunk_time_interval => INTERVAL '1 day',
+    if_not_exists => TRUE);
+
+-- 环境温度数据表（用于漏热评估）
+CREATE TABLE IF NOT EXISTS ambient_temperature_data (
+    time TIMESTAMPTZ NOT NULL,
+    location_id INTEGER NOT NULL DEFAULT 1,
+    temperature NUMERIC(8,4) NOT NULL,
+    humidity NUMERIC(8,4),
+    wind_speed NUMERIC(8,4),
+    solar_radiation NUMERIC(10,4),
+    CONSTRAINT pk_ambient_temp PRIMARY KEY (time, location_id)
+);
+
+SELECT create_hypertable('ambient_temperature_data', 'time',
+    chunk_time_interval => INTERVAL '1 day',
+    if_not_exists => TRUE);
+
+-- 新增告警类型
+INSERT INTO alarm_config (alarm_type, alarm_level, temp_threshold, description) VALUES
+('BOG_COMPRESSOR_FAULT', 1, NULL, 'BOG压缩机故障预警：振动或电流异常')
+ON CONFLICT (alarm_type) DO NOTHING;
+
+INSERT INTO alarm_config (alarm_type, alarm_level, pressure_threshold_pct, description) VALUES
+('HEAT_LEAK_WARNING', 1, NULL, '储罐保冷性能下降预警：导热系数升高超过阈值')
+ON CONFLICT (alarm_type) DO NOTHING;
+
+INSERT INTO alarm_config (alarm_type, alarm_level, description) VALUES
+('UNLOADING_RISK_WARNING', 1, '卸船过程翻滚风险预警：预测分层超限')
+ON CONFLICT (alarm_type) DO NOTHING;
+
 GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO postgres;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO postgres;

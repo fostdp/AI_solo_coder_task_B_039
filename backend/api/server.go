@@ -4,10 +4,14 @@ import (
 	"context"
 	"fmt"
 	"lng-monitoring/alarm"
+	"lng-monitoring/bog_diagnostic"
 	"lng-monitoring/config"
 	"lng-monitoring/database"
+	"lng-monitoring/heat_leak"
 	"lng-monitoring/models"
+	"lng-monitoring/multi_tank_scheduler"
 	"lng-monitoring/prediction"
+	"lng-monitoring/unloading_predictor"
 	"net/http"
 	"strconv"
 	"time"
@@ -17,14 +21,27 @@ import (
 )
 
 type Server struct {
-	cfg         *config.Config
-	db          *database.DB
-	predictor   *prediction.RolloverPredictor
-	alarmEngine *alarm.AlarmEngine
-	router      *gin.Engine
+	cfg                 *config.Config
+	db                  *database.DB
+	predictor           *prediction.RolloverPredictor
+	alarmEngine         *alarm.AlarmEngine
+	bogDiagnostic       *bog_diagnostic.BOGDiagnosticService
+	heatLeakEvaluator   *heat_leak.HeatLeakEvaluator
+	unloadingPredictor  *unloading_predictor.UnloadingPredictor
+	multiTankScheduler  *multi_tank_scheduler.MultiTankScheduler
+	router              *gin.Engine
 }
 
-func NewServer(cfg *config.Config, db *database.DB, predictor *prediction.RolloverPredictor, alarmEngine *alarm.AlarmEngine) *Server {
+func NewServer(
+	cfg *config.Config,
+	db *database.DB,
+	predictor *prediction.RolloverPredictor,
+	alarmEngine *alarm.AlarmEngine,
+	bogDiagnostic *bog_diagnostic.BOGDiagnosticService,
+	heatLeakEvaluator *heat_leak.HeatLeakEvaluator,
+	unloadingPredictor *unloading_predictor.UnloadingPredictor,
+	multiTankScheduler *multi_tank_scheduler.MultiTankScheduler,
+) *Server {
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.New()
 	router.Use(gin.Recovery())
@@ -38,11 +55,15 @@ func NewServer(cfg *config.Config, db *database.DB, predictor *prediction.Rollov
 	}))
 
 	s := &Server{
-		cfg:         cfg,
-		db:          db,
-		predictor:   predictor,
-		alarmEngine: alarmEngine,
-		router:      router,
+		cfg:                 cfg,
+		db:                  db,
+		predictor:           predictor,
+		alarmEngine:         alarmEngine,
+		bogDiagnostic:       bogDiagnostic,
+		heatLeakEvaluator:   heatLeakEvaluator,
+		unloadingPredictor:  unloadingPredictor,
+		multiTankScheduler:  multiTankScheduler,
+		router:              router,
 	}
 
 	s.setupRoutes()
@@ -69,6 +90,21 @@ func (s *Server) setupRoutes() {
 		api.GET("/alarm-config", s.GetAlarmConfig)
 
 		api.GET("/health", s.HealthCheck)
+
+		api.GET("/tanks/:id/bog-diagnostic", s.GetBOGDiagnostic)
+		api.GET("/tanks/:id/bog-history", s.GetBOGDiagnosticHistory)
+		api.POST("/bog-diagnostic/run", s.RunBOGDiagnostic)
+
+		api.GET("/tanks/:id/heat-leak", s.GetHeatLeakAssessment)
+		api.GET("/tanks/:id/heat-leak-history", s.GetHeatLeakHistory)
+		api.POST("/heat-leak/run", s.RunHeatLeakEvaluation)
+
+		api.GET("/tanks/:id/unloading-prediction", s.GetUnloadingPrediction)
+		api.POST("/unloading-prediction/run", s.RunUnloadingPrediction)
+
+		api.GET("/schedule/latest", s.GetLatestSchedule)
+		api.POST("/schedule/run", s.RunScheduleOptimization)
+		api.GET("/schedule/cost-breakdown", s.GetScheduleCostBreakdown)
 	}
 }
 
@@ -377,6 +413,224 @@ func (s *Server) HealthCheck(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"status": "healthy", "time": time.Now().Format(time.RFC3339)})
+}
+
+func (s *Server) GetBOGDiagnostic(c *gin.Context) {
+	tankID, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid tank id"})
+		return
+	}
+
+	compressorID := 1
+	if cid := c.Query("compressor"); cid != "" {
+		if id, err := strconv.Atoi(cid); err == nil {
+			compressorID = id
+		}
+	}
+
+	data, err := s.db.GetLatestBOGDiagnostic(c.Request.Context(), tankID, compressorID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, data)
+}
+
+func (s *Server) GetBOGDiagnosticHistory(c *gin.Context) {
+	tankID, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid tank id"})
+		return
+	}
+
+	duration := 24 * time.Hour
+	if d := c.Query("duration"); d != "" {
+		if hours, err := strconv.Atoi(d); err == nil {
+			duration = time.Duration(hours) * time.Hour
+		}
+	}
+
+	data, err := s.db.GetBOGDiagnosticHistory(c.Request.Context(), tankID, duration)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, data)
+}
+
+func (s *Server) RunBOGDiagnostic(c *gin.Context) {
+	var req models.DiagnosticManualRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	historyHours := 24
+	if req.HistoryHours > 0 {
+		historyHours = req.HistoryHours
+	}
+
+	result, err := s.bogDiagnostic.RunManualDiagnostic(
+		c.Request.Context(),
+		req.TankID,
+		req.CompressorID,
+		historyHours,
+	)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, result)
+}
+
+func (s *Server) GetHeatLeakAssessment(c *gin.Context) {
+	tankID, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid tank id"})
+		return
+	}
+
+	data, err := s.db.GetLatestHeatLeakAssessment(c.Request.Context(), tankID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, data)
+}
+
+func (s *Server) GetHeatLeakHistory(c *gin.Context) {
+	tankID, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid tank id"})
+		return
+	}
+
+	duration := 7 * 24 * time.Hour
+	if d := c.Query("duration"); d != "" {
+		if hours, err := strconv.Atoi(d); err == nil {
+			duration = time.Duration(hours) * time.Hour
+		}
+	}
+
+	data, err := s.db.GetHeatLeakHistory(c.Request.Context(), tankID, duration)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, data)
+}
+
+func (s *Server) RunHeatLeakEvaluation(c *gin.Context) {
+	var req models.HeatLeakManualRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	historyHours := 24
+	if req.HistoryHours > 0 {
+		historyHours = req.HistoryHours
+	}
+
+	result, err := s.heatLeakEvaluator.RunManualEvaluation(
+		c.Request.Context(),
+		req.TankID,
+		req.AmbientTemp,
+		historyHours,
+	)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, result)
+}
+
+func (s *Server) GetUnloadingPrediction(c *gin.Context) {
+	tankID, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid tank id"})
+		return
+	}
+
+	data, err := s.db.GetLatestUnloadingPrediction(c.Request.Context(), tankID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, data)
+}
+
+func (s *Server) RunUnloadingPrediction(c *gin.Context) {
+	var req models.UnloadingManualRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	result, err := s.unloadingPredictor.RunManualPrediction(
+		c.Request.Context(),
+		req,
+	)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, result)
+}
+
+func (s *Server) GetLatestSchedule(c *gin.Context) {
+	data, err := s.db.GetLatestSchedule(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, data)
+}
+
+func (s *Server) RunScheduleOptimization(c *gin.Context) {
+	result, err := s.multiTankScheduler.RunManualOptimization(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, result)
+}
+
+func (s *Server) GetScheduleCostBreakdown(c *gin.Context) {
+	schedule, err := s.db.GetLatestSchedule(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	params := s.cfg.ModelParams.Scheduler
+	evaporationLossCost := schedule.EvaporationLoss * params.EvaporationLossCostYuan
+
+	totalCompressorLoad := 0.0
+	for _, load := range schedule.CompressorLoads {
+		totalCompressorLoad += load
+	}
+	compressorPowerCost := totalCompressorLoad * params.CompressorPowerKWPerPct * params.ElectricityCostYuan
+
+	totalPumpPower := 0.0
+	for _, op := range schedule.PumpOperations {
+		if op.ShouldRun {
+			totalPumpPower += params.PumpPowerKW
+		}
+	}
+	pumpPowerCost := totalPumpPower * params.ElectricityCostYuan
+
+	breakdown := gin.H{
+		"evaporation_loss_ton":  schedule.EvaporationLoss,
+		"evaporation_loss_cost": evaporationLossCost,
+		"compressor_power_cost": compressorPowerCost,
+		"pump_power_cost":       pumpPowerCost,
+		"total_operating_cost":  evaporationLossCost + compressorPowerCost + pumpPowerCost,
+		"currency":              "CNY",
+	}
+
+	c.JSON(http.StatusOK, breakdown)
 }
 
 func (s *Server) Handler() http.Handler {

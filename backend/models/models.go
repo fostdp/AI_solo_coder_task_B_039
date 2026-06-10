@@ -120,3 +120,88 @@ type Tank3DData struct {
 	Alarms        []Alarm             `json:"alarms,omitempty"`
 	CompressorStatus []BOGCompressorData `json:"compressor_status,omitempty"`
 }
+
+type BOGDiagnostic struct {
+	Time              time.Time `json:"time"`
+	TankID            int       `json:"tank_id"`
+	CompressorID      int       `json:"compressor_id"`
+	AnomalyScore      float64   `json:"anomaly_score"`
+	IsAnomaly         bool      `json:"is_anomaly"`
+	AnomalyType       string    `json:"anomaly_type,omitempty"`
+	Confidence        float64   `json:"confidence,omitempty"`
+	RemainingHours    float64   `json:"remaining_hours,omitempty"`
+	Recommendation    string    `json:"recommendation,omitempty"`
+	VibrationTrend    float64   `json:"vibration_trend,omitempty"`
+	CurrentTrend      float64   `json:"current_trend,omitempty"`
+	ModelVersion      string    `json:"model_version"`
+}
+
+type HeatLeakAssessment struct {
+	Time                    time.Time `json:"time"`
+	TankID                  int       `json:"tank_id"`
+	EquivalentConductivity  float64   `json:"equivalent_conductivity"`
+	InsulationPerformance   float64   `json:"insulation_performance"`
+	HeatLeakRate            float64   `json:"heat_leak_rate"`
+	LeakRegions             []int     `json:"leak_regions,omitempty"`
+	IsWarning               bool      `json:"is_warning"`
+	TotalHeatLoadKW         float64   `json:"total_heat_load_kw"`
+	AmbientTemp             float64   `json:"ambient_temp,omitempty"`
+	InnerTemp               float64   `json:"inner_temp,omitempty"`
+	ModelVersion            string    `json:"model_version"`
+}
+
+type UnloadingPredictionModel struct {
+	Time                time.Time   `json:"time"`
+	TankID              int         `json:"tank_id"`
+	UnloadingRate       float64     `json:"unloading_rate"`
+	UnloadingDensity    float64     `json:"unloading_density"`
+	UnloadingTemp       float64     `json:"unloading_temp"`
+	EstimatedDuration   float64     `json:"estimated_duration"`
+	MaxTempDiff         float64     `json:"max_temp_diff"`
+	MaxDensityDiff      float64     `json:"max_density_diff"`
+	OptimalPumpOnTime   float64     `json:"optimal_pump_on_time"`
+	RolloverRisk        float64     `json:"rollover_risk"`
+	TimeSteps           []float64   `json:"time_steps,omitempty"`
+	PredictedTemps      [][]float64 `json:"predicted_temps,omitempty"`
+	PredictedDensities  [][]float64 `json:"predicted_densities,omitempty"`
+	ModelVersion        string      `json:"model_version"`
+}
+
+type MultiTankSchedule struct {
+	Time                time.Time       `json:"time"`
+	CompressorLoads     map[string]int  `json:"compressor_loads"`
+	PumpOperations      []PumpSchedule  `json:"pump_operations,omitempty"`
+	EvaporationLossKg   float64         `json:"evaporation_loss_kg"`
+	EvaporationLossM3   float64         `json:"evaporation_loss_m3"`
+	ObjectiveValue      float64         `json:"objective_value"`
+	OptimizationStatus  string          `json:"optimization_status"`
+	ModelVersion        string          `json:"model_version"`
+}
+
+type PumpSchedule struct {
+	TankID    int     `json:"tank_id"`
+	PumpID    int     `json:"pump_id"`
+	StartTime float64 `json:"start_time_hours"`
+	Duration  float64 `json:"duration_hours"`
+	Action    string  `json:"action"`
+}
+
+type UnloadingManualRequest struct {
+	TankID            int     `json:"tank_id"`
+	UnloadingRate     float64 `json:"unloading_rate" binding:"required,min=100,max=5000"`
+	UnloadingDensity  float64 `json:"unloading_density" binding:"required,min=400,max=460"`
+	UnloadingTemp     float64 `json:"unloading_temp" binding:"required,min=-165,max=-150"`
+	EstimatedDuration float64 `json:"estimated_duration" binding:"required,min=1,max=48"`
+}
+
+type DiagnosticManualRequest struct {
+	TankID       int `json:"tank_id" binding:"required,min=1,max=4"`
+	CompressorID int `json:"compressor_id" binding:"required,min=1,max=2"`
+	HistoryHours int `json:"history_hours" binding:"min=1,max=168"`
+}
+
+type HeatLeakManualRequest struct {
+	TankID             int     `json:"tank_id" binding:"required,min=1,max=4"`
+	AmbientTemperature float64 `json:"ambient_temperature" binding:"required,min=-30,max=50"`
+	HistoryHours       int     `json:"history_hours" binding:"min=1,max=168"`
+}

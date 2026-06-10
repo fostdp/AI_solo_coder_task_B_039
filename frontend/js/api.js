@@ -75,5 +75,74 @@ const API = {
         } catch (e) {
             return { status: 'unhealthy' };
         }
+    },
+
+    async getBOGDiagnostic(tankId, compressorId = 1) {
+        const response = await fetch(`${CONFIG.API_BASE_URL}/tanks/${tankId}/bog-diagnostic?compressor=${compressorId}`);
+        return await response.json();
+    },
+
+    async getBOGDiagnosticHistory(tankId, duration = 24) {
+        const response = await fetch(`${CONFIG.API_BASE_URL}/tanks/${tankId}/bog-history?duration=${duration}`);
+        return await response.json();
+    },
+
+    async runBOGDiagnostic(tankId, compressorId, historyHours = 24) {
+        const response = await fetch(`${CONFIG.API_BASE_URL}/bog-diagnostic/run`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ tank_id: tankId, compressor_id: compressorId, history_hours: historyHours })
+        });
+        return await response.json();
+    },
+
+    async getHeatLeakAssessment(tankId) {
+        const response = await fetch(`${CONFIG.API_BASE_URL}/tanks/${tankId}/heat-leak`);
+        return await response.json();
+    },
+
+    async getHeatLeakHistory(tankId, duration = 168) {
+        const response = await fetch(`${CONFIG.API_BASE_URL}/tanks/${tankId}/heat-leak-history?duration=${duration}`);
+        return await response.json();
+    },
+
+    async runHeatLeakEvaluation(tankId, ambientTemp, historyHours = 24) {
+        const response = await fetch(`${CONFIG.API_BASE_URL}/heat-leak/run`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ tank_id: tankId, ambient_temp: ambientTemp, history_hours: historyHours })
+        });
+        return await response.json();
+    },
+
+    async getUnloadingPrediction(tankId) {
+        const response = await fetch(`${CONFIG.API_BASE_URL}/tanks/${tankId}/unloading-prediction`);
+        return await response.json();
+    },
+
+    async runUnloadingPrediction(request) {
+        const response = await fetch(`${CONFIG.API_BASE_URL}/unloading-prediction/run`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(request)
+        });
+        return await response.json();
+    },
+
+    async getLatestSchedule() {
+        const response = await fetch(`${CONFIG.API_BASE_URL}/schedule/latest`);
+        return await response.json();
+    },
+
+    async runScheduleOptimization() {
+        const response = await fetch(`${CONFIG.API_BASE_URL}/schedule/run`, {
+            method: 'POST'
+        });
+        return await response.json();
+    },
+
+    async getScheduleCostBreakdown() {
+        const response = await fetch(`${CONFIG.API_BASE_URL}/schedule/cost-breakdown`);
+        return await response.json();
     }
 };

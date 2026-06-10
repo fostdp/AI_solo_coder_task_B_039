@@ -86,3 +86,104 @@ type ForwardResult struct {
 	Error     string
 	Timestamp time.Time
 }
+
+type BOGBatch struct {
+	TankID      int
+	Data        []models.BOGCompressorData
+	CollectedAt time.Time
+}
+
+type BOGDiagnosticRequest struct {
+	TankID         int
+	CompressorID   int
+	BOGHistory     []models.BOGCompressorData
+	CollectedAt    time.Time
+}
+
+type BOGDiagnosticResult struct {
+	TankID          int
+	CompressorID    int
+	AnomalyScore    float64
+	IsAnomaly       bool
+	AnomalyType     string
+	Confidence      float64
+	RemainingHours  float64
+	Recommendation  string
+	DiagnosedAt     time.Time
+	ErrorMessage    string
+}
+
+type HeatLeakRequest struct {
+	TankID              int
+	TemperatureHistory  []models.LayerSummary
+	AmbientTemperature  float64
+	CollectedAt         time.Time
+}
+
+type HeatLeakResult struct {
+	TankID                 int
+	EquivalentConductivity float64
+	InsulationPerformance  float64
+	HeatLeakRate           float64
+	LeakRegion             []int
+	IsWarning              bool
+	TotalHeatLoadKW        float64
+	LastCalibratedAt       time.Time
+	EvaluatedAt            time.Time
+	ErrorMessage           string
+}
+
+type UnloadingRequest struct {
+	TankID              int
+	UnloadingRate       float64
+	UnloadingDensity    float64
+	UnloadingTemp       float64
+	InitialTemps        []float64
+	InitialDensities    []float64
+	EstimatedDuration   float64
+	RequestedAt         time.Time
+}
+
+type UnloadingPrediction struct {
+	TankID              int
+	PredictedTemps      [][]float64
+	PredictedDensities  [][]float64
+	TimeSteps           []float64
+	MaxTempDiff         float64
+	MaxDensityDiff      float64
+	OptimalPumpOnTime   float64
+	RolloverRisk        float64
+	PredictedAt         time.Time
+	ErrorMessage        string
+}
+
+type SchedulerRequest struct {
+	TankStates      []TankStateForScheduler
+	CollectedAt     time.Time
+}
+
+type TankStateForScheduler struct {
+	TankID      int
+	Level       float64
+	AvgTemp     float64
+	RiskIndex   float64
+	Pressure    float64
+	HasBOGComp1 bool
+	HasBOGComp2 bool
+}
+
+type ScheduleResult struct {
+	CompressorLoads   map[string]float64
+	PumpOperations    []PumpOperation
+	EvaporationLoss   float64
+	OptimizedAt       time.Time
+	ErrorMessage      string
+}
+
+type PumpOperation struct {
+	TankID    int
+	PumpID    int
+	StartTime float64
+	Duration  float64
+	Action    string
+}

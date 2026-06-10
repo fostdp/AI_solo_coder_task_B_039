@@ -79,24 +79,79 @@ type TankSpecs struct {
 	LayerHeights          []float64 `json:"layer_heights"`
 }
 
+type BOGDiagnosticParams struct {
+	ContaminationRate      float64            `json:"contamination_rate"`
+	NormalVibrationRange   [2]float64         `json:"normal_vibration_range"`
+	NormalCurrentRange     [2]float64         `json:"normal_current_range"`
+	AnomalyThreshold       float64            `json:"anomaly_threshold"`
+	WarningThreshold       float64            `json:"warning_threshold"`
+	HistoryWindowHours     int                `json:"history_window_hours"`
+	TrendWindowPoints      int                `json:"trend_window_points"`
+	IForestNTrees          int                `json:"iforest_n_trees"`
+	IForestSampleSize      int                `json:"iforest_sample_size"`
+	FaultTypeThresholds    map[string]float64 `json:"fault_type_thresholds"`
+}
+
+type HeatLeakParams struct {
+	ReferenceConductivity   float64 `json:"reference_conductivity"`
+	InsulationThickness     float64 `json:"insulation_thickness"`
+	WarningThresholdPct     float64 `json:"warning_threshold_pct"`
+	EvaluationIntervalHours int     `json:"evaluation_interval_hours"`
+	HistoryWindowHours      int     `json:"history_window_hours"`
+	AmbientTempSensorAddr   int     `json:"ambient_temp_sensor_addr"`
+	SurfaceAreaSqM          float64 `json:"surface_area_sq_m"`
+	MaxHeatLoadKW           float64 `json:"max_heat_load_kw"`
+	CalibrationIntervalDays int     `json:"calibration_interval_days"`
+}
+
+type UnloadingParams struct {
+	MixingEfficiency        float64 `json:"mixing_efficiency"`
+	PumpFlowRateM3H         float64 `json:"pump_flow_rate_m3h"`
+	MinPumpDurationHours    float64 `json:"min_pump_duration_hours"`
+	MaxStratificationSafe   float64 `json:"max_stratification_safe"`
+	PredictionTimeStepMin   int     `json:"prediction_time_step_min"`
+	NumVerticalLayers       int     `json:"num_vertical_layers"`
+	AxialDispersionCoeff    float64 `json:"axial_dispersion_coeff"`
+	DensityDiffusionCoeff   float64 `json:"density_diffusion_coeff"`
+}
+
+type SchedulerParams struct {
+	CompressorEfficiency    float64            `json:"compressor_efficiency"`
+	EvaporationLossCostYuan float64            `json:"evaporation_loss_cost_yuan_per_ton"`
+	ElectricityCostYuan     float64            `json:"electricity_cost_yuan_per_kwh"`
+	PumpPowerKW             float64            `json:"pump_power_kw"`
+	CompressorPowerKWPerPct float64            `json:"compressor_power_kw_per_pct"`
+	MaxLoadPctPerCompressor map[string]float64 `json:"max_load_pct_per_compressor"`
+	MinRuntimeHours         float64            `json:"min_runtime_hours"`
+	OptimizationIntervalMin int                `json:"optimization_interval_min"`
+}
+
 type ModelParams struct {
-	PhysicalProperties  PhysicalProperties  `json:"physical_properties"`
-	NumericalMethod     NumericalMethod     `json:"numerical_method"`
-	StabilityAnalysis   StabilityAnalysis   `json:"stability_analysis"`
-	RiskCalculation     RiskCalculation     `json:"risk_calculation"`
-	AlarmThresholds     AlarmThresholds     `json:"alarm_thresholds"`
+	PhysicalProperties  PhysicalProperties   `json:"physical_properties"`
+	NumericalMethod     NumericalMethod      `json:"numerical_method"`
+	StabilityAnalysis   StabilityAnalysis    `json:"stability_analysis"`
+	RiskCalculation     RiskCalculation      `json:"risk_calculation"`
+	AlarmThresholds     AlarmThresholds      `json:"alarm_thresholds"`
 	ModbusRegister      ModbusRegisterConfig `json:"modbus_config"`
-	TankSpecs           TankSpecs           `json:"tank_specs"`
+	TankSpecs           TankSpecs            `json:"tank_specs"`
+	BOGDiagnostic       BOGDiagnosticParams  `json:"bog_diagnostic"`
+	HeatLeak            HeatLeakParams       `json:"heat_leak"`
+	Unloading           UnloadingParams      `json:"unloading"`
+	Scheduler           SchedulerParams      `json:"scheduler"`
 }
 
 type Config struct {
-	Database    DatabaseConfig
-	Modbus      ModbusConfig
-	OPCUA       OPCUAConfig
-	Server      ServerConfig
-	Alarm       AlarmConfig
-	Prediction  PredictionConfig
-	ModelParams *ModelParams
+	Database       DatabaseConfig
+	Modbus         ModbusConfig
+	OPCUA          OPCUAConfig
+	Server         ServerConfig
+	Alarm          AlarmConfig
+	Prediction     PredictionConfig
+	BOGDiagnostic  BOGDiagnosticConfig
+	HeatLeak       HeatLeakConfig
+	Unloading      UnloadingConfig
+	Scheduler      SchedulerConfig
+	ModelParams    *ModelParams
 }
 
 type DatabaseConfig struct {
@@ -135,11 +190,43 @@ type AlarmConfig struct {
 }
 
 type PredictionConfig struct {
-	IntervalSec      int
-	ModelVersion     string
-	GridPoints       int
-	TimeSteps        int
+	IntervalSec        int
+	ModelVersion       string
+	GridPoints         int
+	TimeSteps          int
 	StabilityThreshold float64
+}
+
+type BOGDiagnosticConfig struct {
+	IntervalSec        int
+	ModelVersion       string
+	AnomalyThreshold   float64
+	WarningThreshold   float64
+	HistoryWindowHours int
+	AutoDiagnose       bool
+}
+
+type HeatLeakConfig struct {
+	IntervalSec          int
+	ModelVersion         string
+	WarningThresholdPct  float64
+	HistoryWindowHours   int
+	AutoEvaluate         bool
+	DefaultAmbientTemp   float64
+}
+
+type UnloadingConfig struct {
+	ModelVersion       string
+	PredictionEnabled  bool
+	MinUnloadingRate   float64
+	MaxUnloadingRate   float64
+}
+
+type SchedulerConfig struct {
+	IntervalSec        int
+	ModelVersion       string
+	AutoOptimize       bool
+	MinRiskForAction   float64
 }
 
 func Load() *Config {
@@ -181,6 +268,34 @@ func Load() *Config {
 			TimeSteps:            getEnvInt("TIME_STEPS", 1000),
 			StabilityThreshold:   getEnvFloat("STABILITY_THRESHOLD", 0.5),
 		},
+		BOGDiagnostic: BOGDiagnosticConfig{
+			IntervalSec:        getEnvInt("BOG_DIAGNOSTIC_INTERVAL", 300),
+			ModelVersion:       "1.0",
+			AnomalyThreshold:   getEnvFloat("BOG_ANOMALY_THRESHOLD", 0.7),
+			WarningThreshold:   getEnvFloat("BOG_WARNING_THRESHOLD", 0.5),
+			HistoryWindowHours: getEnvInt("BOG_HISTORY_WINDOW", 24),
+			AutoDiagnose:       getEnvBool("BOG_AUTO_DIAGNOSE", true),
+		},
+		HeatLeak: HeatLeakConfig{
+			IntervalSec:         getEnvInt("HEATLEAK_INTERVAL", 3600),
+			ModelVersion:        "1.0",
+			WarningThresholdPct: getEnvFloat("HEATLEAK_WARNING_PCT", 20.0),
+			HistoryWindowHours:  getEnvInt("HEATLEAK_HISTORY_WINDOW", 24),
+			AutoEvaluate:        getEnvBool("HEATLEAK_AUTO_EVALUATE", true),
+			DefaultAmbientTemp:  getEnvFloat("DEFAULT_AMBIENT_TEMP", 25.0),
+		},
+		Unloading: UnloadingConfig{
+			ModelVersion:      "1.0",
+			PredictionEnabled: getEnvBool("UNLOADING_PREDICTION_ENABLED", true),
+			MinUnloadingRate:  getEnvFloat("MIN_UNLOADING_RATE", 100.0),
+			MaxUnloadingRate:  getEnvFloat("MAX_UNLOADING_RATE", 5000.0),
+		},
+		Scheduler: SchedulerConfig{
+			IntervalSec:      getEnvInt("SCHEDULER_INTERVAL", 600),
+			ModelVersion:     "1.0",
+			AutoOptimize:     getEnvBool("SCHEDULER_AUTO_OPTIMIZE", true),
+			MinRiskForAction: getEnvFloat("SCHEDULER_MIN_RISK", 0.4),
+		},
 	}
 }
 
@@ -204,6 +319,15 @@ func getEnvFloat(key string, defaultValue float64) float64 {
 	if value, exists := os.LookupEnv(key); exists {
 		if floatValue, err := strconv.ParseFloat(value, 64); err == nil {
 			return floatValue
+		}
+	}
+	return defaultValue
+}
+
+func getEnvBool(key string, defaultValue bool) bool {
+	if value, exists := os.LookupEnv(key); exists {
+		if boolValue, err := strconv.ParseBool(value); err == nil {
+			return boolValue
 		}
 	}
 	return defaultValue

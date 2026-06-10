@@ -348,3 +348,301 @@ func (db *DB) GetAlarmConfig(ctx context.Context) ([]models.AlarmConfig, error) 
 	}
 	return configs, nil
 }
+
+func (db *DB) GetBOGHistory(ctx context.Context, tankID int, historyHours int) ([]models.BOGCompressorData, error) {
+	startTime := time.Now().Add(-time.Duration(historyHours) * time.Hour)
+	rows, err := db.pool.Query(ctx, `
+		SELECT time, tank_id, compressor_id, running_status, vibration_level, motor_current, discharge_pressure, modbus_address
+		FROM bog_compressor_data
+		WHERE tank_id = $1 AND time >= $2 AND running_status = 1
+		ORDER BY time`,
+		tankID, startTime)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var data []models.BOGCompressorData
+	for rows.Next() {
+		var d models.BOGCompressorData
+		err := rows.Scan(&d.Time, &d.TankID, &d.CompressorID, &d.RunningStatus, &d.VibrationLevel, &d.MotorCurrent, &d.DischargePressure, &d.ModbusAddress)
+		if err != nil {
+			return nil, err
+		}
+		data = append(data, d)
+	}
+	return data, nil
+}
+
+func (db *DB) InsertBOGDiagnostic(ctx context.Context, diag *models.BOGDiagnostic) error {
+	_, err := db.pool.Exec(ctx, `INSERT INTO bog_diagnostic
+		(time, tank_id, compressor_id, anomaly_score, is_anomaly, anomaly_type, confidence,
+		 remaining_hours, recommendation, vibration_trend, current_trend, model_version)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+		diag.Time, diag.TankID, diag.CompressorID, diag.AnomalyScore, diag.IsAnomaly,
+		diag.AnomalyType, diag.Confidence, diag.RemainingHours, diag.Recommendation,
+		diag.VibrationTrend, diag.CurrentTrend, diag.ModelVersion)
+	return err
+}
+
+func (db *DB) GetLatestBOGDiagnostic(ctx context.Context, tankID, compressorID int) (*models.BOGDiagnostic, error) {
+	var d models.BOGDiagnostic
+	err := db.pool.QueryRow(ctx, `
+		SELECT time, tank_id, compressor_id, anomaly_score, is_anomaly, anomaly_type,
+		       confidence, remaining_hours, recommendation, vibration_trend, current_trend, model_version
+		FROM bog_diagnostic
+		WHERE tank_id = $1 AND compressor_id = $2
+		ORDER BY time DESC LIMIT 1`,
+		tankID, compressorID).Scan(
+		&d.Time, &d.TankID, &d.CompressorID, &d.AnomalyScore, &d.IsAnomaly, &d.AnomalyType,
+		&d.Confidence, &d.RemainingHours, &d.Recommendation, &d.VibrationTrend, &d.CurrentTrend, &d.ModelVersion)
+	if err != nil {
+		return nil, err
+	}
+	return &d, nil
+}
+
+func (db *DB) GetBOGDiagnosticHistory(ctx context.Context, tankID int, duration time.Duration) ([]models.BOGDiagnostic, error) {
+	startTime := time.Now().Add(-duration)
+	rows, err := db.pool.Query(ctx, `
+		SELECT time, tank_id, compressor_id, anomaly_score, is_anomaly, anomaly_type,
+		       confidence, remaining_hours, recommendation, model_version
+		FROM bog_diagnostic
+		WHERE tank_id = $1 AND time >= $2
+		ORDER BY compressor_id, time`,
+		tankID, startTime)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var data []models.BOGDiagnostic
+	for rows.Next() {
+		var d models.BOGDiagnostic
+		err := rows.Scan(&d.Time, &d.TankID, &d.CompressorID, &d.AnomalyScore, &d.IsAnomaly,
+			&d.AnomalyType, &d.Confidence, &d.RemainingHours, &d.Recommendation, &d.ModelVersion)
+		if err != nil {
+			return nil, err
+		}
+		data = append(data, d)
+	}
+	return data, nil
+}
+
+func (db *DB) InsertHeatLeakAssessment(ctx context.Context, assessment *models.HeatLeakAssessment) error {
+	_, err := db.pool.Exec(ctx, `INSERT INTO heat_leak_assessment
+		(time, tank_id, equivalent_conductivity, insulation_performance, heat_leak_rate,
+		 leak_regions, is_warning, total_heat_load_kw, ambient_temp, inner_temp, model_version)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+		assessment.Time, assessment.TankID, assessment.EquivalentConductivity,
+		assessment.InsulationPerformance, assessment.HeatLeakRate, assessment.LeakRegions,
+		assessment.IsWarning, assessment.TotalHeatLoadKW, assessment.AmbientTemp,
+		assessment.InnerTemp, assessment.ModelVersion)
+	return err
+}
+
+func (db *DB) GetLatestHeatLeakAssessment(ctx context.Context, tankID int) (*models.HeatLeakAssessment, error) {
+	var d models.HeatLeakAssessment
+	var leakRegions []int32
+	err := db.pool.QueryRow(ctx, `
+		SELECT time, tank_id, equivalent_conductivity, insulation_performance, heat_leak_rate,
+		       leak_regions, is_warning, total_heat_load_kw, ambient_temp, inner_temp, model_version
+		FROM heat_leak_assessment
+		WHERE tank_id = $1
+		ORDER BY time DESC LIMIT 1`,
+		tankID).Scan(
+		&d.Time, &d.TankID, &d.EquivalentConductivity, &d.InsulationPerformance, &d.HeatLeakRate,
+		&leakRegions, &d.IsWarning, &d.TotalHeatLoadKW, &d.AmbientTemp, &d.InnerTemp, &d.ModelVersion)
+	if err != nil {
+		return nil, err
+	}
+	for _, v := range leakRegions {
+		d.LeakRegions = append(d.LeakRegions, int(v))
+	}
+	return &d, nil
+}
+
+func (db *DB) GetHeatLeakHistory(ctx context.Context, tankID int, duration time.Duration) ([]models.HeatLeakAssessment, error) {
+	startTime := time.Now().Add(-duration)
+	rows, err := db.pool.Query(ctx, `
+		SELECT time, tank_id, equivalent_conductivity, insulation_performance, heat_leak_rate,
+		       leak_regions, is_warning, total_heat_load_kw, model_version
+		FROM heat_leak_assessment
+		WHERE tank_id = $1 AND time >= $2
+		ORDER BY time`,
+		tankID, startTime)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var data []models.HeatLeakAssessment
+	for rows.Next() {
+		var d models.HeatLeakAssessment
+		var leakRegions []int32
+		err := rows.Scan(&d.Time, &d.TankID, &d.EquivalentConductivity, &d.InsulationPerformance,
+			&d.HeatLeakRate, &leakRegions, &d.IsWarning, &d.TotalHeatLoadKW, &d.ModelVersion)
+		if err != nil {
+			return nil, err
+		}
+		for _, v := range leakRegions {
+			d.LeakRegions = append(d.LeakRegions, int(v))
+		}
+		data = append(data, d)
+	}
+	return data, nil
+}
+
+func (db *DB) GetLayerSummaryHistory(ctx context.Context, tankID int, historyHours int) ([]models.LayerSummary, error) {
+	startTime := time.Now().Add(-time.Duration(historyHours) * time.Hour)
+	rows, err := db.pool.Query(ctx, `
+		SELECT time, tank_id, layer, avg_temp, min_temp, max_temp, temp_stddev
+		FROM layer_summary
+		WHERE tank_id = $1 AND time >= $2
+		ORDER BY layer, time`,
+		tankID, startTime)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var data []models.LayerSummary
+	for rows.Next() {
+		var d models.LayerSummary
+		err := rows.Scan(&d.Time, &d.TankID, &d.Layer, &d.AvgTemp, &d.MinTemp, &d.MaxTemp, &d.TempStd)
+		if err != nil {
+			return nil, err
+		}
+		data = append(data, d)
+	}
+	return data, nil
+}
+
+func (db *DB) GetAmbientTemperature(ctx context.Context, duration time.Duration) (float64, error) {
+	startTime := time.Now().Add(-duration)
+	var avgTemp float64
+	err := db.pool.QueryRow(ctx, `
+		SELECT COALESCE(AVG(temperature), 25.0)
+		FROM ambient_temperature_data
+		WHERE time >= $1
+		ORDER BY time DESC LIMIT 100`,
+		startTime).Scan(&avgTemp)
+	if err != nil {
+		return 25.0, nil
+	}
+	return avgTemp, nil
+}
+
+func (db *DB) InsertAmbientTemperature(ctx context.Context, temp, humidity, windSpeed, solarRad float64) error {
+	_, err := db.pool.Exec(ctx, `INSERT INTO ambient_temperature_data
+		(time, location_id, temperature, humidity, wind_speed, solar_radiation)
+		VALUES ($1, $2, $3, $4, $5, $6)`,
+		time.Now(), 1, temp, humidity, windSpeed, solarRad)
+	return err
+}
+
+func (db *DB) InsertUnloadingPrediction(ctx context.Context, pred *models.UnloadingPredictionModel) error {
+	_, err := db.pool.Exec(ctx, `INSERT INTO unloading_prediction
+		(time, tank_id, unloading_rate, unloading_density, unloading_temp, estimated_duration,
+		 max_temp_diff, max_density_diff, optimal_pump_on_time, rollover_risk,
+		 time_steps, predicted_temps, predicted_densities, model_version)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+		pred.Time, pred.TankID, pred.UnloadingRate, pred.UnloadingDensity, pred.UnloadingTemp,
+		pred.EstimatedDuration, pred.MaxTempDiff, pred.MaxDensityDiff,
+		pred.OptimalPumpOnTime, pred.RolloverRisk,
+		pred.TimeSteps, pred.PredictedTemps, pred.PredictedDensities, pred.ModelVersion)
+	return err
+}
+
+func (db *DB) GetLatestUnloadingPrediction(ctx context.Context, tankID int) (*models.UnloadingPredictionModel, error) {
+	var p models.UnloadingPredictionModel
+	var timeSteps []float64
+	var predictedTemps [][]float64
+	var predictedDensities [][]float64
+	err := db.pool.QueryRow(ctx, `
+		SELECT time, tank_id, unloading_rate, unloading_density, unloading_temp, estimated_duration,
+		       max_temp_diff, max_density_diff, optimal_pump_on_time, rollover_risk,
+		       time_steps, predicted_temps, predicted_densities, model_version
+		FROM unloading_prediction
+		WHERE tank_id = $1
+		ORDER BY time DESC LIMIT 1`,
+		tankID).Scan(
+		&p.Time, &p.TankID, &p.UnloadingRate, &p.UnloadingDensity, &p.UnloadingTemp,
+		&p.EstimatedDuration, &p.MaxTempDiff, &p.MaxDensityDiff, &p.OptimalPumpOnTime,
+		&p.RolloverRisk, &timeSteps, &predictedTemps, &predictedDensities, &p.ModelVersion)
+	if err != nil {
+		return nil, err
+	}
+	p.TimeSteps = timeSteps
+	p.PredictedTemps = predictedTemps
+	p.PredictedDensities = predictedDensities
+	return &p, nil
+}
+
+func (db *DB) InsertMultiTankSchedule(ctx context.Context, schedule *models.MultiTankSchedule) error {
+	_, err := db.pool.Exec(ctx, `INSERT INTO multi_tank_schedule
+		(time, compressor_loads, pump_operations, evaporation_loss_kg, evaporation_loss_m3,
+		 objective_value, optimization_status, model_version)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+		schedule.Time, schedule.CompressorLoads, schedule.PumpOperations,
+		schedule.EvaporationLossKg, schedule.EvaporationLossM3,
+		schedule.ObjectiveValue, schedule.OptimizationStatus, schedule.ModelVersion)
+	return err
+}
+
+func (db *DB) GetLatestSchedule(ctx context.Context) (*models.MultiTankSchedule, error) {
+	var s models.MultiTankSchedule
+	var compressorLoads map[string]int
+	var pumpOperations []models.PumpSchedule
+	err := db.pool.QueryRow(ctx, `
+		SELECT time, compressor_loads, pump_operations, evaporation_loss_kg,
+		       evaporation_loss_m3, objective_value, optimization_status, model_version
+		FROM multi_tank_schedule
+		ORDER BY time DESC LIMIT 1`).Scan(
+		&s.Time, &compressorLoads, &pumpOperations, &s.EvaporationLossKg,
+		&s.EvaporationLossM3, &s.ObjectiveValue, &s.OptimizationStatus, &s.ModelVersion)
+	if err != nil {
+		return nil, err
+	}
+	s.CompressorLoads = compressorLoads
+	s.PumpOperations = pumpOperations
+	return &s, nil
+}
+
+func (db *DB) GetTankLevelEstimate(ctx context.Context, tankID int) (float64, error) {
+	var level float64
+	err := db.pool.QueryRow(ctx, `
+		SELECT COALESCE(
+			(SELECT AVG(temperature) 
+			 FROM temperature_data 
+			 WHERE tank_id = $1 AND time >= NOW() - INTERVAL '1 hour'),
+			-162.0)`,
+		tankID).Scan(&level)
+	if err != nil {
+		return 0.0, err
+	}
+	normalizedTemp := (level + 162.0) / 15.0
+	return 0.3 + normalizedTemp*0.5, nil
+}
+
+func (db *DB) GetTankCompressorStatus(ctx context.Context, tankID int) (map[int]bool, error) {
+	status := make(map[int]bool)
+	rows, err := db.pool.Query(ctx, `
+		SELECT DISTINCT ON (compressor_id) compressor_id, running_status
+		FROM bog_compressor_data
+		WHERE tank_id = $1 AND time >= NOW() - INTERVAL '1 hour'
+		ORDER BY compressor_id, time DESC`,
+		tankID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var compID, runningStatus int
+		if err := rows.Scan(&compID, &runningStatus); err == nil {
+			status[compID] = runningStatus == 1
+		}
+	}
+	return status, nil
+}

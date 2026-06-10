@@ -67,5 +67,62 @@
         "density_meters": 3,
         "density_sensor_heights": [4.0, 24.0, 44.0],
         "layer_heights": [4.8, 14.4, 24.0, 33.6, 43.2]
+    },
+    "bog_diagnostic": {
+        "contamination_rate": 0.1,
+        "normal_vibration_range": [0.5, 3.0],
+        "normal_current_range": [15.0, 45.0],
+        "anomaly_threshold": 0.7,
+        "warning_threshold": 0.5,
+        "history_window_hours": 24,
+        "trend_window_points": 50,
+        "iforest_n_trees": 100,
+        "iforest_sample_size": 256,
+        "fault_type_thresholds": {
+            "bearing_fault": 0.65,
+            "piston_ring_wear": 0.60,
+            "imbalance": 0.55,
+            "motor_fault": 0.70
+        }
+    },
+    "heat_leak": {
+        "reference_conductivity": 0.025,
+        "insulation_thickness": 0.8,
+        "warning_threshold_pct": 20.0,
+        "evaluation_interval_hours": 1,
+        "history_window_hours": 24,
+        "ambient_temp_sensor_addr": 900,
+        "surface_area_sq_m": 25000.0,
+        "max_heat_load_kw": 150.0,
+        "calibration_interval_days": 90
+    },
+    "unloading": {
+        "mixing_efficiency": 0.85,
+        "pump_flow_rate_m3h": 800.0,
+        "min_pump_duration_hours": 0.5,
+        "max_stratification_safe": 3.0,
+        "prediction_time_step_min": 5,
+        "num_vertical_layers": 20,
+        "axial_dispersion_coeff": 0.05,
+        "density_diffusion_coeff": 1.0e-8
+    },
+    "scheduler": {
+        "compressor_efficiency": 0.75,
+        "evaporation_loss_cost_yuan_per_ton": 4500.0,
+        "electricity_cost_yuan_per_kwh": 0.65,
+        "pump_power_kw": 220.0,
+        "compressor_power_kw_per_pct": 2.5,
+        "max_load_pct_per_compressor": {
+            "T1_C1": 100.0,
+            "T1_C2": 100.0,
+            "T2_C1": 100.0,
+            "T2_C2": 100.0,
+            "T3_C1": 100.0,
+            "T3_C2": 100.0,
+            "T4_C1": 100.0,
+            "T4_C2": 100.0
+        },
+        "min_runtime_hours": 2.0,
+        "optimization_interval_min": 10
     }
 }
