@@ -2,258 +2,432 @@
 
 ## 系统概述
 
-本系统是一套完整的大型液化天然气(LNG)储罐翻滚预测与安全监控全栈应用。系统针对4座16万立方米LNG储罐，实现实时数据采集、翻滚风险预测、多级告警和三维可视化监控。
+本系统针对大型液化天然气（LNG）接收站的4座16万立方米储罐，实现翻滚（Rollover）现象的实时预测与安全监控。系统通过Modbus TCP采集罐内温度、密度、压力等数据，采用有限体积法求解分层对流方程，预测分层失稳临界时间，当翻滚风险超过阈值时通过OPC UA推送告警至DCS系统。
 
 ## 系统架构
 
 ```
-┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
-│  Modbus TCP     │────▶│   Go 后端服务   │────▶│  TimescaleDB    │
-│  模拟器/设备    │     │  (数据采集/处   │     │  (时序数据库)  │
-│                 │     │   理/预测/告警) │     │                 │
-└─────────────────┘     └─────────────────┘     └─────────────────┘
-                                  │
-                                  ▼
-                        ┌─────────────────┐
-                        │   前端可视化    │
-                        │ (Three.js 3D)   │
-                        └─────────────────┘
-                                  │
-                                  ▼
-                        ┌─────────────────┐
-                        │   OPC UA/DCS    │
-                        │   告警推送      │
-                        └─────────────────┘
+                          ┌──────────────────────────────┐
+                          │        前端Web界面           │
+                          │  (Nginx + Gzip压缩)         │
+                          │  ┌─────────────────────┐     │
+                          │  │ tank_3d_viewer.js   │     │
+                          │  │ risk_dashboard.js   │     │
+                          │  └─────────────────────┘     │
+                          └──────────────┬───────────────┘
+                                         │ HTTP/REST API
+                                         ▼
+┌───────────────────────────────────────────────────────────────────────────┐
+│                              Go后端服务                                   │
+│  ┌─────────────────┐  Channel  ┌──────────────────┐  Channel  ┌─────────┐│
+│  │  modbus_poller  │──────────▶│ rollover_predictor│──────────▶│  alarm  ││
+│  │  (优先级队列)   │ PollResult │ (有限体积法)      │ Prediction │ forward ││
+│  │                 │           │ (风险计算)        │ Result     │ (OPC UA)││
+│  └────────┬────────┘           └────────┬─────────┘           └────┬────┘│
+│           │                             │                            │     │
+│           │ Modbus TCP                  │ 写入TimescaleDB           │ OPC UA│
+└───────────┼─────────────────────────────┼────────────────────────────┼─────┘
+            │                             │                            │
+            ▼                             ▼                            ▼
+┌──────────────────────┐      ┌──────────────────────┐      ┌─────────────────┐
+│  Modbus模拟器        │      │   TimescaleDB        │      │  OPC UA模拟器   │
+│  (4座×43传感器)      │      │ (自动压缩+保留策略)  │      │  (DCS模拟)      │
+│  HTTP API控制        │      │  连续聚合视图        │      │  HTTP API控制   │
+└──────────────────────┘      └──────────────────────┘      └─────────────────┘
+
+┌───────────────────────────────────────────────────────────────────────────┐
+│                              监控体系                                    │
+│  ┌─────────────────┐          ┌──────────────────┐                        │
+│  │   Prometheus    │◀─────────│   Go pprof       │                        │
+│  │   (指标采集)     │  /metrics │  (性能分析)      │                        │
+│  └─────────────────┘          └──────────────────┘                        │
+└───────────────────────────────────────────────────────────────────────────┘
 ```
 
-## 功能特性
+### 核心模块说明
 
-### 数据采集
-- 每30秒通过Modbus TCP采集传感器数据
-- 每座储罐5层温度计阵列（每层8个）
-- 每座储罐3台密度计
-- 罐顶压力变送器数据
-- BOG压缩机状态监测
+| 模块 | 目录 | 职责 |
+|------|------|------|
+| **modbus_poller** | `backend/modbus_poller/` | Modbus数据采集、三级优先级队列调度（二叉堆实现）、层统计计算 |
+| **rollover_predictor** | `backend/rollover_predictor/` | 有限体积法求解分层对流方程、欠松弛因子、自适应时间步长、残差监控、风险计算 |
+| **alarm_forwarder** | `backend/alarm_forwarder/` | OPC UA告警推送、断线重连+心跳、BOG压缩机控制、低压泵控制 |
+| **messages** | `backend/messages/` | 模块间channel通信消息定义 |
+| **Tank3DViewer** | `frontend/js/tank_3d_viewer.js` | Three.js三维储罐可视化、WebGL性能优化、移动端适配 |
+| **RiskDashboard** | `frontend/js/risk_dashboard.js` | 风险仪表盘、ECharts趋势图、告警管理、传感器详情 |
 
-### 翻滚预测模型
-- 基于有限体积法求解分层对流方程
-- 温度梯度和密度梯度分析
-- 分层稳定性评估
-- 临界失稳时间预测
-- 风险指数计算（0-100%）
+## 快速部署
 
-### 告警系统
-- **一级翻滚预警**：层间温差>8℃ 且 密度差>2kg/m³
-- **二级超压告警**：罐压超过设计压力90%
-- 告警通过OPC UA推送至DCS
-- BOG压缩机自动调节控制
-- 建议开启低压泵循环混合
+### 环境要求
+- Docker >= 24.0
+- Docker Compose >= 2.20
+- 内存 >= 4GB
+- 磁盘 >= 20GB
 
-### 前端可视化
-- Three.js 3D储罐模型
-- Canvas剖面图显示
-- 温度分层颜色渲染
-- 密度等值线标注
-- 传感器点击交互
-- 24小时趋势曲线（ECharts）
-- 风险仪表盘
-
-## 项目结构
-
-```
-AI_solo_coder_task_A_039/
-├── backend/                    # Go后端服务
-│   ├── main.go                 # 主程序入口
-│   ├── go.mod                  # 依赖管理
-│   ├── .env.example            # 环境变量示例
-│   ├── config/                 # 配置模块
-│   │   └── config.go
-│   ├── models/                 # 数据模型
-│   │   └── models.go
-│   ├── database/               # 数据库操作
-│   │   └── database.go
-│   ├── modbus/                 # Modbus TCP采集
-│   │   └── client.go
-│   ├── prediction/             # 翻滚预测模型
-│   │   └── rollover_model.go
-│   ├── alarm/                  # 告警引擎
-│   │   ├── engine.go
-│   │   └── opcua.go
-│   └── api/                    # RESTful API
-│       └── server.go
-├── frontend/                   # 前端应用
-│   ├── index.html              # 主页面
-│   ├── css/
-│   │   └── style.css           # 样式文件
-│   └── js/
-│       ├── config.js           # 前端配置
-│       ├── api.js              # API调用
-│       ├── visualization.js    # 可视化工具
-│       ├── threeScene.js       # Three.js 3D场景
-│       └── main.js             # 主程序
-├── database/                   # 数据库脚本
-│   └── init.sql                # TimescaleDB初始化
-└── simulator/                  # Modbus TCP模拟器
-    ├── modbus_simulator.py     # 模拟器主程序
-    └── requirements.txt        # Python依赖
-```
-
-## 快速开始
-
-### 1. 数据库初始化
+### 一键启动
 
 ```bash
-# 安装TimescaleDB
-# 参考: https://docs.timescale.com/install/latest/
+# 克隆项目
+git clone <repository-url>
+cd AI_solo_coder_task_A_039
 
-# 执行初始化脚本
-psql -U postgres -f database/init.sql
+# 启动所有服务
+docker-compose up -d
+
+# 查看服务状态
+docker-compose ps
+
+# 查看日志
+docker-compose logs -f backend
 ```
 
-### 2. 启动Modbus TCP模拟器
+### 服务访问地址
+
+| 服务 | 地址 | 说明 |
+|------|------|------|
+| 前端监控界面 | http://localhost:80 | 三维视图+仪表盘 |
+| Go后端API | http://localhost:8080 | REST API接口 |
+| Prometheus监控 | http://localhost:9090 | 指标查询 |
+| pprof性能分析 | http://localhost:6060/debug/pprof/ | Go性能分析 |
+| Modbus模拟器API | http://localhost:8000 | 模拟器控制 |
+| OPC UA模拟器API | http://localhost:8001 | DCS模拟控制 |
+| Modbus TCP | localhost:5020 | 工业协议端口 |
+| OPC UA | opc.tcp://localhost:4840 | 工业协议端口 |
+
+### 停止服务
 
 ```bash
-cd simulator
-pip install -r requirements.txt
-python modbus_simulator.py --port 5020
+# 停止服务
+docker-compose down
 
-# 可用命令:
-#   status          - 查看当前状态
-#   rollover <1-4>  - 手动触发指定储罐翻滚事件
-#   help            - 显示帮助
+# 停止并清除数据（谨慎使用）
+docker-compose down -v
 ```
 
-### 3. 启动Go后端服务
+## Modbus模拟器使用
+
+### 功能特性
+- 4座储罐，每座43个传感器（5层×8温度 + 3密度）
+- 30秒数据更新间隔（可配置）
+- 支持注入温度密度分层条件
+- 支持手动触发翻滚事件
+- HTTP API远程控制
+
+### API接口
+
+```bash
+# 获取所有储罐状态
+curl http://localhost:8000/api/status
+
+# 健康检查
+curl http://localhost:8000/health
+
+# 触发翻滚事件（储罐ID: 1-4）
+curl "http://localhost:8000/api/induce_rollover?tank_id=1"
+
+# 注入分层条件
+curl "http://localhost:8000/api/inject_stratification?tank_id=1&temp_diff=10.0&density_diff=3.0"
+
+# 重置储罐数据
+curl "http://localhost:8000/api/reset_tank?tank_id=1"
+
+# 设置更新间隔（秒）
+curl "http://localhost:8000/api/set_interval?seconds=15"
+```
+
+### 环境变量配置
+
+```bash
+MODBUS_HOST=0.0.0.0      # 监听地址
+MODBUS_PORT=502          # Modbus端口
+API_PORT=8000            # API端口
+UPDATE_INTERVAL=30       # 数据更新间隔（秒）
+```
+
+## OPC UA模拟器使用
+
+### 功能特性
+- 模拟DCS系统OPC UA服务器
+- 4座储罐节点（风险、温差、密度差、压力）
+- 告警节点展示
+- 系统状态监控
+- HTTP API查询和管理
+
+### 节点结构
+
+```
+Root
+└─ Objects
+   └─ LNGSystem (ns=2)
+      ├─ Tanks
+      │  ├─ Tank_1
+      │  │  ├─ RolloverRisk (Float)
+      │  │  ├─ TemperatureDiff (Float)
+      │  │  ├─ DensityDiff (Float)
+      │  │  └─ Pressure (Float)
+      │  ├─ Tank_2 ... Tank_4
+      ├─ Alarms
+      │  ├─ Tank_1_Alarm (String)
+      │  └─ ... Tank_4_Alarm
+      ├─ SystemStatus (String)
+      └─ ActiveAlarmsCount (Int32)
+```
+
+### API接口
+
+```bash
+# 获取服务器状态
+curl http://localhost:8001/api/status
+
+# 获取告警列表（最近100条）
+curl http://localhost:8001/api/alarms
+
+# 清除指定告警
+curl "http://localhost:8001/api/clear_alarm?alarm_id=1"
+```
+
+## 监控与运维
+
+### Prometheus指标
+
+系统暴露以下Prometheus指标（`http://localhost:8080/metrics`）：
+
+| 指标名称 | 类型 | 标签 | 说明 |
+|----------|------|------|------|
+| `modbus_poll_total` | Counter | tank_id, data_type | Modbus采集总次数 |
+| `prediction_duration_seconds` | Histogram | tank_id | 预测计算耗时 |
+| `alarm_total` | Counter | tank_id, alarm_level | 告警产生总数 |
+| `active_connections` | Gauge | module | 活跃连接数 |
+
+### pprof性能分析
+
+```bash
+# 采集30秒CPU profile
+go tool pprof http://localhost:6060/debug/pprof/profile?seconds=30
+
+# 查看内存使用
+go tool pprof http://localhost:6060/debug/pprof/heap
+
+# 查看goroutine
+go tool pprof http://localhost:6060/debug/pprof/goroutine
+
+# 查看阻塞操作
+go tool pprof http://localhost:6060/debug/pprof/block
+```
+
+### TimescaleDB数据管理
+
+自动配置的数据保留策略：
+
+| 数据表 | 压缩时间 | 保留时间 |
+|--------|----------|----------|
+| temperature_data | 7天 | 3个月 |
+| density_data | 7天 | 3个月 |
+| pressure_data | 7天 | 3个月 |
+| bog_compressor_data | 7天 | 3个月 |
+| layer_summary | 7天 | 6个月 |
+| rollover_prediction | 3天 | 1年 |
+| alarms | - | 1年 |
+
+连续聚合视图：
+- `temperature_15min`：15分钟温度汇总（每15分钟刷新）
+- `density_1hour`：1小时密度汇总（每小时刷新）
+
+## 模型参数配置
+
+所有物理模型参数通过JSON配置文件加载，文件位于：
+`backend/config/model_params.json`
+
+### 主要配置项
+
+```json
+{
+  "physical_properties": {
+    "gravity": 9.81,
+    "kinematic_viscosity": 1.5e-7,
+    "thermal_diffusivity": 1.2e-7,
+    "thermal_expansion_coefficient": 0.001
+  },
+  "numerical_method": {
+    "grid_points": 50,
+    "initial_time_step": 0.1,
+    "initial_under_relaxation": 0.5,
+    "cfl_limit": 0.5
+  },
+  "stability_analysis": { ... },
+  "risk_calculation": { ... },
+  "alarm_thresholds": { ... },
+  "tank_specs": { ... }
+}
+```
+
+修改配置后重启Go服务生效：
+```bash
+docker-compose restart backend
+```
+
+## 告警配置
+
+### 两级告警机制
+
+| 级别 | 触发条件 | 动作 |
+|------|----------|------|
+| **一级（翻滚预警）** | 层间温差 > 8℃ **且** 密度差 > 2 kg/m³ | OPC UA推送告警 + 建议开启低压泵循环混合 |
+| **二级（超压告警）** | 罐压 > 设计压力 × 90% | OPC UA推送告警 + 启动BOG压缩机自动调节 |
+
+### 告警推送特性
+- 断线自动重连（指数退避）
+- 10秒心跳检测
+- 告警缓存（最多100条），断线恢复后自动补发
+- 告警去重（同一条件30秒内不重复推送）
+
+## 模块通信协议
+
+模块间通过Go Channel传递消息，消息类型定义在 `backend/messages/messages.go`
+
+### 消息流
+
+```
+modbus_poller
+    ↓ PollResult { TankID, DataType, Data, CollectedAt }
+main.go (数据聚合层)
+    ↓ PredictionRequest { TankID, Temperatures, Densities, Pressure }
+rollover_predictor
+    ↓ PredictionResult { TankID, RiskIndex, RiskLevel, CriticalTime, ... }
+alarm_forwarder
+    ↓ ForwardResult { TankID, Success, AlarmLevel, Message }
+    ↓ ControlCommand { TankID, CommandType, Parameters }
+modbus_poller (写入寄存器)
+```
+
+## 本地开发
+
+### Go后端开发
 
 ```bash
 cd backend
 
-# 复制并配置环境变量
-cp .env.example .env
-# 编辑 .env 文件，根据实际情况修改配置
-
 # 安装依赖
-go mod tidy
+go mod download
 
-# 编译并运行
-go build -o lng-monitor
-./lng-monitor
+# 本地运行（需要TimescaleDB和模拟器）
+go run .
+
+# 构建静态二进制
+CGO_ENABLED=1 GOOS=linux GOARCH=amd64 \
+    go build -ldflags '-w -s -linkmode external -extldflags "-static"' \
+    -o lng-monitor .
 ```
 
-### 4. 启动前端应用
+### 前端开发
 
 ```bash
 cd frontend
 
-# 使用任意静态文件服务器，例如:
-python -m http.server 8081
+# 本地开发服务器
+python -m http.server 8080
 
-# 或使用Node.js:
-npx serve .
+# 构建生产镜像
+docker build -f Dockerfile.frontend -t lng-frontend .
 ```
 
-### 5. 访问系统
+### 运行测试
 
-打开浏览器访问: `http://localhost:8081`
+```bash
+# Go单元测试
+cd backend && go test ./...
 
-## API接口
+# 模拟器手动测试
+# 1. 启动Modbus模拟器
+python simulator/modbus_simulator.py --port 5020
 
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| GET | `/api/tanks` | 获取储罐列表 |
-| GET | `/api/tanks/:id/data` | 获取储罐3D可视化数据 |
-| GET | `/api/tanks/:id/temperature` | 获取温度数据 |
-| GET | `/api/tanks/:id/density` | 获取密度数据 |
-| GET | `/api/tanks/:id/pressure` | 获取压力数据 |
-| GET | `/api/tanks/:id/prediction` | 获取翻滚预测结果 |
-| GET | `/api/sensors/:tankId/:layer/:sensor/trend` | 获取传感器温度趋势 |
-| GET | `/api/density-sensors/:tankId/:sensor/trend` | 获取密度趋势 |
-| GET | `/api/alarms` | 获取活动告警 |
-| POST | `/api/alarms/:id/acknowledge` | 确认告警 |
-| POST | `/api/alarms/:id/clear` | 清除告警 |
-| GET | `/api/health` | 健康检查 |
+# 2. 触发翻滚事件
+curl "http://localhost:8000/api/induce_rollover?tank_id=1"
 
-## Modbus寄存器映射
+# 3. 检查告警是否产生
+curl "http://localhost:8080/api/alarms/active"
+```
 
-每座储罐占用1000个寄存器地址，基地址为 `(tank_id - 1) * 1000`
+## 目录结构
 
-| 地址范围 | 数据类型 | 说明 |
-|----------|----------|------|
-| 0-39 | float32 | 5层×8个温度传感器 |
-| 500-505 | float32 | 3个密度计 |
-| 600-601 | float32 | 罐顶压力 |
-| 700 | uint16 | 1#压缩机状态 |
-| 701-708 | float32 | 1#压缩机振动/电流/排气压力 |
-| 710 | uint16 | 2#压缩机状态 |
-| 711-718 | float32 | 2#压缩机参数 |
-
-## 翻滚预测模型算法
-
-### 有限体积法求解分层对流方程
-
-1. **控制方程**：
-   - 连续性方程: ∂ρ/∂t + ∂(ρu)/∂z = 0
-   - 动量方程: ∂u/∂t + u∂u/∂z = -g/ρ ∂ρ/∂z + ν ∂²u/∂z²
-
-2. **分层稳定性评估**：
-   - 浮力频率 N² = -g/ρ ∂ρ/∂z
-   - 稳定性指数 = 1 - exp(-N² × 100)
-
-3. **风险指数计算**：
-   - 温度差权重: 35%
-   - 密度差权重: 25%
-   - 不稳定性权重: 25%
-   - 临界时间权重: 15%
+```
+AI_solo_coder_task_A_039/
+├── backend/
+│   ├── modbus_poller/         # Modbus采集模块
+│   ├── rollover_predictor/    # 预测模型模块
+│   ├── alarm_forwarder/       # 告警转发模块
+│   ├── messages/              # 消息定义
+│   ├── config/                # 配置（含model_params.json）
+│   ├── models/                # 数据模型
+│   ├── database/              # 数据库操作
+│   ├── api/                   # HTTP API
+│   ├── main.go                # 主程序入口
+│   ├── Dockerfile             # Go多阶段构建
+│   └── go.mod
+├── frontend/
+│   ├── js/
+│   │   ├── tank_3d_viewer.js  # 三维视图模块
+│   │   └── risk_dashboard.js  # 仪表盘模块
+│   ├── css/
+│   ├── index.html
+│   ├── nginx.conf             # Nginx配置（Gzip）
+│   └── Dockerfile.frontend
+├── simulator/
+│   ├── modbus_simulator.py    # Modbus模拟器（增强版）
+│   ├── opcua_simulator.py     # OPC UA模拟器
+│   ├── Dockerfile.modbus
+│   ├── Dockerfile.opcua
+│   └── requirements.txt
+├── database/
+│   ├── init.sql               # 数据库初始化
+│   └── timescale-config.sh    # 压缩+保留策略
+├── monitoring/
+│   └── prometheus.yml         # Prometheus配置
+├── docker-compose.yml         # 服务编排
+└── README.md
+```
 
 ## 技术栈
 
 ### 后端
-- **语言**: Go 1.21
-- **Web框架**: Gin
-- **数据库**: PostgreSQL + TimescaleDB
-- **Modbus**: goburrow/modbus
-- **OPC UA**: gopcua/opcua
-- **数值计算**: gonum
-
-### 前端
-- **3D渲染**: Three.js r160
-- **图表**: ECharts 5.4
-- **HTTP客户端**: Fetch API
-- **样式**: CSS3
+- **Go 1.21** - 高性能后端服务
+- **Gin** - HTTP API框架
+- **pgx** - PostgreSQL/TimescaleDB驱动
+- **gopcua** - OPC UA客户端
+- **pyModbusTCP** - Modbus协议
+- **Prometheus Client** - 指标暴露
+- **pprof** - 性能分析
 
 ### 数据库
-- **时序数据库**: TimescaleDB
-- **特性**: 超表、连续聚合、自动分区
+- **TimescaleDB 2.13** - 时序数据库（PostgreSQL 16）
+- 连续聚合、自动压缩、数据保留策略
 
-## 告警级别说明
+### 前端
+- **Three.js r149** - 3D可视化
+- **ECharts 5** - 图表库
+- **Nginx** - Web服务器（Gzip压缩）
 
-| 级别 | 类型 | 触发条件 | 建议动作 |
-|------|------|----------|----------|
-| 1 | 翻滚预警 | 层间温差>8℃ 且 密度差>2kg/m³ | 开启低压泵循环混合 |
-| 2 | 超压告警 | 罐压>设计压力90% | 检查BOG压缩机，紧急泄压 |
+### DevOps
+- **Docker** - 容器化
+- **Docker Compose** - 编排
+- **Prometheus** - 监控
 
-## 生产部署建议
+## 常见问题
 
-1. **高可用性**：
-   - 使用Kubernetes部署Go后端
-   - TimescaleDB配置流复制
-   - Modbus连接冗余配置
+### Q: Modbus连接失败？
+A: 检查5020端口是否被占用，Linux下端口<1024需要root权限，可使用5020端口映射。
 
-2. **数据保留**：
-   - 原始数据保留3个月
-   - 15分钟聚合数据保留1年
-   - 1小时聚合数据永久保留
+### Q: 前端页面无法加载数据？
+A: 检查backend容器是否健康，查看API日志：`docker-compose logs backend`
 
-3. **安全**：
-   - 启用TLS加密
-   - API使用JWT认证
-   - Modbus TCP使用VPN隔离
-   - OPC UA使用安全策略
+### Q: TimescaleDB启动慢？
+A: 首次启动需要初始化数据库和创建超表，约需1-2分钟。
 
-## 许可证
+### Q: 如何调整数据保留时间？
+A: 修改 `database/timescale-config.sh` 中的保留策略，重新执行脚本或重建数据库。
 
-本项目仅供学习和研究使用。
+### Q: 模拟器数据更新太快/太慢？
+A: 通过API调整：`curl "http://localhost:8000/api/set_interval?seconds=15"`
 
-## 联系方式
+## License
 
-如有技术问题，请查看各模块源代码中的详细注释。
+MIT License
