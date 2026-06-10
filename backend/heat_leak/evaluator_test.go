@@ -2,6 +2,7 @@ package heat_leak
 
 import (
 	"math"
+	"math/rand"
 	"testing"
 	"time"
 
@@ -10,6 +11,8 @@ import (
 	"lng-monitoring/models"
 	"lng-monitoring/testutils"
 )
+
+var rng = rand.New(rand.NewSource(42))
 
 func TestInverseSolverLeastSquares(t *testing.T) {
 	solver := &InverseSolver{
@@ -165,7 +168,7 @@ func TestHeatLeakLocalization(t *testing.T) {
 			layerHeatRates := evaluator.calculateLayerHeatRates(layerData)
 
 			_, detectedRegions := evaluator.solveInverseProblem(
-				layerHeatRates, layerData, innerTemp, 25.0, 0.025,
+				layerHeatRates, layerData, innerTemp, 25.0, 0.025, 0.01,
 			)
 
 			detectedSet := make(map[int]bool)
@@ -730,4 +733,150 @@ func TestHeatLeakResultFields(t *testing.T) {
 	}
 
 	t.Logf("Heat leak result: %+v", result)
+}
+
+func TestRootCause_AmbientTempSuddenChangeStability(t *testing.T) {
+	cfg := testutils.NewTestConfig()
+	evaluator := &HeatLeakEvaluator{
+		cfg:         cfg,
+		modelParams: &cfg.ModelParams.HeatLeak,
+		calibration: make(map[int]float64),
+	}
+
+	nLayers := 20
+	nTimeSteps := 48
+	stableAmbient := 25.0
+
+	stableHistory := testutils.GenerateHeatLeakData(nLayers, nTimeSteps, []int{}, 0.0)
+	stableResult := evaluator.evaluateHeatLeak(nil, 1, stableHistory, stableAmbient)
+
+	suddenChangeHistory := generateAmbientSuddenChangeData(nLayers, nTimeSteps, stableAmbient)
+	suddenChangeAmbient := 35.0
+
+	evaluator.modelParams.AdaptiveRegularizationOn = false
+	evaluator.modelParams.SlidingWindowSize = 1
+	resultWithoutReg := evaluator.evaluateHeatLeak(nil, 1, suddenChangeHistory, suddenChangeAmbient)
+
+	evaluator.modelParams.AdaptiveRegularizationOn = true
+	evaluator.modelParams.SlidingWindowSize = 6
+	resultWithReg := evaluator.evaluateHeatLeak(nil, 1, suddenChangeHistory, suddenChangeAmbient)
+
+	t.Logf("Stable condition K: %.6f", stableResult.EquivalentConductivity)
+	t.Logf("Without regularization K: %.6f", resultWithoutReg.EquivalentConductivity)
+	t.Logf("With regularization K: %.6f", resultWithReg.EquivalentConductivity)
+
+	deviationWithout := math.Abs(resultWithoutReg.EquivalentConductivity - stableResult.EquivalentConductivity)
+	deviationWith := math.Abs(resultWithReg.EquivalentConductivity - stableResult.EquivalentConductivity)
+
+	t.Logf("Deviation without regularization: %.6f", deviationWithout)
+	t.Logf("Deviation with regularization: %.6f", deviationWith)
+	t.Logf("Improvement: %.2f%%", (deviationWithout-deviationWith)/deviationWithout*100)
+
+	if deviationWith >= deviationWithout {
+		t.Errorf("Regularization did not reduce deviation. Without: %.6f, With: %.6f", deviationWithout, deviationWith)
+	}
+
+	relativeDeviation := deviationWith / stableResult.EquivalentConductivity
+	if relativeDeviation > 0.15 {
+		t.Errorf("Deviation with regularization too large: %.2f%%, expected < 15%%", relativeDeviation*100)
+	}
+}
+
+func TestRootCause_SlidingWindowSmoothing(t *testing.T) {
+	cfg := testutils.NewTestConfig()
+	evaluator := &HeatLeakEvaluator{
+		cfg:         cfg,
+		modelParams: &cfg.ModelParams.HeatLeak,
+		calibration: make(map[int]float64),
+	}
+
+	nLayers := 20
+	nTimeSteps := 48
+	baseTemp := -165.0
+
+	noisyTemps := generateNoisyTemperatureData(nLayers, nTimeSteps, baseTemp)
+
+	evaluator.modelParams.SlidingWindowSize = 1
+	resultNoSmooth := evaluator.evaluateHeatLeak(nil, 1, noisyTemps, 25.0)
+
+	evaluator.modelParams.SlidingWindowSize = 6
+	resultSmooth := evaluator.evaluateHeatLeak(nil, 1, noisyTemps, 25.0)
+
+	t.Logf("Without smoothing K: %.6f, HeatLeakRate: %.2f", resultNoSmooth.EquivalentConductivity, resultNoSmooth.HeatLeakRate)
+	t.Logf("With smoothing K: %.6f, HeatLeakRate: %.2f", resultSmooth.EquivalentConductivity, resultSmooth.HeatLeakRate)
+
+	expectedK := 0.025
+	errorNoSmooth := math.Abs(resultNoSmooth.EquivalentConductivity - expectedK)
+	errorSmooth := math.Abs(resultSmooth.EquivalentConductivity - expectedK)
+
+	t.Logf("Error without smoothing: %.6f", errorNoSmooth)
+	t.Logf("Error with smoothing: %.6f", errorSmooth)
+
+	if errorSmooth >= errorNoSmooth {
+		t.Errorf("Sliding window did not reduce error. Without: %.6f, With: %.6f", errorNoSmooth, errorSmooth)
+	}
+
+	relativeError := errorSmooth / expectedK
+	if relativeError > 0.10 {
+		t.Errorf("Relative error too large: %.2f%%, expected < 10%%", relativeError*100)
+	}
+}
+
+func TestRootCause_AdaptiveRegularization(t *testing.T) {
+	cfg := testutils.NewTestConfig()
+	evaluator := &HeatLeakEvaluator{
+		cfg:         cfg,
+		modelParams: &cfg.ModelParams.HeatLeak,
+		calibration: make(map[int]float64),
+	}
+
+	stableChangeRate := 0.1
+	moderateChangeRate := 0.6
+	highChangeRate := 2.0
+
+	lambdaStable := evaluator.calculateAdaptiveLambda(stableChangeRate)
+	lambdaModerate := evaluator.calculateAdaptiveLambda(moderateChangeRate)
+	lambdaHigh := evaluator.calculateAdaptiveLambda(highChangeRate)
+
+	t.Logf("Lambda at change rate %.1f: %.6f", stableChangeRate, lambdaStable)
+	t.Logf("Lambda at change rate %.1f: %.6f", moderateChangeRate, lambdaModerate)
+	t.Logf("Lambda at change rate %.1f: %.6f", highChangeRate, lambdaHigh)
+
+	if lambdaStable != evaluator.modelParams.BaseRegularizationLambda {
+		t.Errorf("Expected base lambda for stable condition, got %.6f", lambdaStable)
+	}
+
+	if lambdaModerate <= lambdaStable {
+		t.Errorf("Expected higher lambda for moderate change rate. Stable: %.6f, Moderate: %.6f", lambdaStable, lambdaModerate)
+	}
+
+	if lambdaHigh <= lambdaModerate {
+		t.Errorf("Expected higher lambda for high change rate. Moderate: %.6f, High: %.6f", lambdaModerate, lambdaHigh)
+	}
+
+	if lambdaHigh > evaluator.modelParams.MaxRegularizationLambda {
+		t.Errorf("Lambda exceeded max limit: %.6f > %.6f", lambdaHigh, evaluator.modelParams.MaxRegularizationLambda)
+	}
+}
+
+func generateAmbientSuddenChangeData(nLayers, nTimeSteps int, baseAmbient float64) []messages.LayerHistoryData {
+	data := testutils.GenerateHeatLeakData(nLayers, nTimeSteps, []int{}, 0.0)
+	for i := range data {
+		if i > nTimeSteps/2 {
+			for j := range data[i].Temperatures {
+				data[i].Temperatures[j] += 0.5 * float64(i-nTimeSteps/2) / float64(nTimeSteps/2)
+			}
+		}
+	}
+	return data
+}
+
+func generateNoisyTemperatureData(nLayers, nTimeSteps int, baseTemp float64) []messages.LayerHistoryData {
+	data := testutils.GenerateHeatLeakData(nLayers, nTimeSteps, []int{}, 0.0)
+	for i := range data {
+		for j := range data[i].Temperatures {
+			data[i].Temperatures[j] = baseTemp + float64(j)*0.1 + rng.NormFloat64()*0.3
+		}
+	}
+	return data
 }

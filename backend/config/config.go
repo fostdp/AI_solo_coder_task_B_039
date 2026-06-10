@@ -90,40 +90,68 @@ type BOGDiagnosticParams struct {
 	IForestNTrees          int                `json:"iforest_n_trees"`
 	IForestSampleSize      int                `json:"iforest_sample_size"`
 	FaultTypeThresholds    map[string]float64 `json:"fault_type_thresholds"`
+	RatedCurrent           float64            `json:"rated_current"`
+	RatedPressure          float64            `json:"rated_pressure"`
+	SteadyStateWindow      int                `json:"steady_state_window"`
+	SteadyStateCurrThresh  float64            `json:"steady_state_curr_thresh"`
+	SteadyStatePressThresh float64            `json:"steady_state_press_thresh"`
+	LoadNormalizationOn    bool               `json:"load_normalization_on"`
+	TransientScoreDiscount float64            `json:"transient_score_discount"`
 }
 
 type HeatLeakParams struct {
-	ReferenceConductivity   float64 `json:"reference_conductivity"`
-	InsulationThickness     float64 `json:"insulation_thickness"`
-	WarningThresholdPct     float64 `json:"warning_threshold_pct"`
-	EvaluationIntervalHours int     `json:"evaluation_interval_hours"`
-	HistoryWindowHours      int     `json:"history_window_hours"`
-	AmbientTempSensorAddr   int     `json:"ambient_temp_sensor_addr"`
-	SurfaceAreaSqM          float64 `json:"surface_area_sq_m"`
-	MaxHeatLoadKW           float64 `json:"max_heat_load_kw"`
-	CalibrationIntervalDays int     `json:"calibration_interval_days"`
+	ReferenceConductivity     float64 `json:"reference_conductivity"`
+	InsulationThickness       float64 `json:"insulation_thickness"`
+	WarningThresholdPct       float64 `json:"warning_threshold_pct"`
+	EvaluationIntervalHours   int     `json:"evaluation_interval_hours"`
+	HistoryWindowHours        int     `json:"history_window_hours"`
+	AmbientTempSensorAddr     int     `json:"ambient_temp_sensor_addr"`
+	SurfaceAreaSqM            float64 `json:"surface_area_sq_m"`
+	MaxHeatLoadKW             float64 `json:"max_heat_load_kw"`
+	CalibrationIntervalDays   int     `json:"calibration_interval_days"`
+	SlidingWindowSize         int     `json:"sliding_window_size"`
+	AmbientTempSmoothAlpha    float64 `json:"ambient_temp_smooth_alpha"`
+	BaseRegularizationLambda  float64 `json:"base_regularization_lambda"`
+	AdaptiveRegularizationOn  bool    `json:"adaptive_regularization_on"`
+	TempChangeRateThreshold   float64 `json:"temp_change_rate_threshold"`
+	MaxRegularizationLambda   float64 `json:"max_regularization_lambda"`
 }
 
 type UnloadingParams struct {
-	MixingEfficiency        float64 `json:"mixing_efficiency"`
-	PumpFlowRateM3H         float64 `json:"pump_flow_rate_m3h"`
-	MinPumpDurationHours    float64 `json:"min_pump_duration_hours"`
-	MaxStratificationSafe   float64 `json:"max_stratification_safe"`
-	PredictionTimeStepMin   int     `json:"prediction_time_step_min"`
-	NumVerticalLayers       int     `json:"num_vertical_layers"`
-	AxialDispersionCoeff    float64 `json:"axial_dispersion_coeff"`
-	DensityDiffusionCoeff   float64 `json:"density_diffusion_coeff"`
+	MixingEfficiency          float64 `json:"mixing_efficiency"`
+	PumpFlowRateM3H           float64 `json:"pump_flow_rate_m3h"`
+	MinPumpDurationHours      float64 `json:"min_pump_duration_hours"`
+	MaxStratificationSafe     float64 `json:"max_stratification_safe"`
+	PredictionTimeStepMin     int     `json:"prediction_time_step_min"`
+	NumVerticalLayers         int     `json:"num_vertical_layers"`
+	AxialDispersionCoeff      float64 `json:"axial_dispersion_coeff"`
+	DensityDiffusionCoeff     float64 `json:"density_diffusion_coeff"`
+	AdaptiveFilteringOn       bool    `json:"adaptive_filtering_on"`
+	FlowRateChangeThreshold   float64 `json:"flow_rate_change_threshold"`
+	MaxMixingEfficiencyBoost  float64 `json:"max_mixing_efficiency_boost"`
+	FlowSmoothingAlpha        float64 `json:"flow_smoothing_alpha"`
+	ResponseTimeSteps         int     `json:"response_time_steps"`
+	MinAxialDispersionBoost   float64 `json:"min_axial_dispersion_boost"`
+	MaxAxialDispersionBoost   float64 `json:"max_axial_dispersion_boost"`
 }
 
 type SchedulerParams struct {
-	CompressorEfficiency    float64            `json:"compressor_efficiency"`
-	EvaporationLossCostYuan float64            `json:"evaporation_loss_cost_yuan_per_ton"`
-	ElectricityCostYuan     float64            `json:"electricity_cost_yuan_per_kwh"`
-	PumpPowerKW             float64            `json:"pump_power_kw"`
-	CompressorPowerKWPerPct float64            `json:"compressor_power_kw_per_pct"`
-	MaxLoadPctPerCompressor map[string]float64 `json:"max_load_pct_per_compressor"`
-	MinRuntimeHours         float64            `json:"min_runtime_hours"`
-	OptimizationIntervalMin int                `json:"optimization_interval_min"`
+	CompressorEfficiency        float64            `json:"compressor_efficiency"`
+	EvaporationLossCostYuan     float64            `json:"evaporation_loss_cost_yuan_per_ton"`
+	ElectricityCostYuan         float64            `json:"electricity_cost_yuan_per_kwh"`
+	PumpPowerKW                 float64            `json:"pump_power_kw"`
+	CompressorPowerKWPerPct     float64            `json:"compressor_power_kw_per_pct"`
+	MaxLoadPctPerCompressor     map[string]float64 `json:"max_load_pct_per_compressor"`
+	MinRuntimeHours             float64            `json:"min_runtime_hours"`
+	OptimizationIntervalMin     int                `json:"optimization_interval_min"`
+	DecompositionOn             bool               `json:"decomposition_on"`
+	MaxTanksPerSubproblem       int                `json:"max_tanks_per_subproblem"`
+	RiskGroupThresholds         []float64          `json:"risk_group_thresholds"`
+	MaxIterationsDecomposition  int                `json:"max_iterations_decomposition"`
+	CoordinationStepSize        float64            `json:"coordination_step_size"`
+	EarlyTerminationGap         float64            `json:"early_termination_gap"`
+	DefaultMaxLoadPct           float64            `json:"default_max_load_pct"`
+	ConcurrentSubproblems      bool               `json:"concurrent_subproblems"`
 }
 
 type ModelParams struct {

@@ -942,3 +942,152 @@ func TestPerformanceBenchmark(t *testing.T) {
 		t.Errorf("Prediction too slow: %v per op", predictPerOp)
 	}
 }
+
+func TestRootCause_LoadFluctuationFalsePositiveReduction(t *testing.T) {
+	cfg := testutils.NewTestConfig()
+	service := &BOGDiagnosticService{
+		cfg:         cfg,
+		modelParams: &cfg.ModelParams.BOGDiagnostic,
+		iforest:     NewIsolationForest(100, 256),
+	}
+
+	nTraining := 300
+	trainingData := make([][]float64, nTraining)
+	for i := 0; i < nTraining; i++ {
+		data := testutils.GenerateNormalBOGData(100, 1)
+		trainingData[i] = service.extractFeatures(data[0], data)
+	}
+	service.iforest.Fit(trainingData)
+
+	nTest := 100
+	falsePositivesWithoutNormalization := 0
+	falsePositivesWithNormalization := 0
+
+	service.modelParams.LoadNormalizationOn = false
+	for i := 0; i < nTest; i++ {
+		normalData := testutils.GenerateNormalBOGData(20, 1)
+		loadFluctuationData := simulateLoadFluctuation(normalData)
+		history := make([]models.BOGCompressorData, len(loadFluctuationData))
+		for j, d := range loadFluctuationData {
+			history[j] = d
+		}
+		result := service.diagnoseCompressor(history[len(history)-1], history)
+		if result.AnomalyScore > service.modelParams.AnomalyThreshold {
+			falsePositivesWithoutNormalization++
+		}
+	}
+
+	service.modelParams.LoadNormalizationOn = true
+	for i := 0; i < nTest; i++ {
+		normalData := testutils.GenerateNormalBOGData(20, 1)
+		loadFluctuationData := simulateLoadFluctuation(normalData)
+		history := make([]models.BOGCompressorData, len(loadFluctuationData))
+		for j, d := range loadFluctuationData {
+			history[j] = d
+		}
+		result := service.diagnoseCompressor(history[len(history)-1], history)
+		if result.AnomalyScore > service.modelParams.AnomalyThreshold {
+			falsePositivesWithNormalization++
+		}
+	}
+
+	fprWithout := float64(falsePositivesWithoutNormalization) / float64(nTest)
+	fprWith := float64(falsePositivesWithNormalization) / float64(nTest)
+	reduction := 0.0
+	if fprWithout > 0 {
+		reduction = (fprWithout - fprWith) / fprWithout
+	}
+
+	t.Logf("False positive rate without normalization: %.2f%%", fprWithout*100)
+	t.Logf("False positive rate with normalization: %.2f%%", fprWith*100)
+	t.Logf("False positive reduction: %.2f%%", reduction*100)
+
+	if fprWith > fprWithout {
+		t.Errorf("Load normalization increased false positives: %.2f%% -> %.2f%%", fprWithout*100, fprWith*100)
+	}
+
+	if reduction < 0.3 {
+		t.Errorf("Expected at least 30%% false positive reduction, got %.2f%%", reduction*100)
+	}
+}
+
+func TestRootCause_SteadyStateIdentification(t *testing.T) {
+	cfg := testutils.NewTestConfig()
+	service := &BOGDiagnosticService{
+		cfg:         cfg,
+		modelParams: &cfg.ModelParams.BOGDiagnostic,
+		iforest:     NewIsolationForest(100, 256),
+	}
+
+	nTraining := 200
+	trainingData := make([][]float64, nTraining)
+	for i := 0; i < nTraining; i++ {
+		data := testutils.GenerateNormalBOGData(50, 1)
+		trainingData[i] = service.extractFeatures(data[0], data)
+	}
+	service.iforest.Fit(trainingData)
+
+	steadyStateData := testutils.GenerateNormalBOGData(20, 1)
+	steadyHistory := make([]models.BOGCompressorData, len(steadyStateData))
+	for i, d := range steadyStateData {
+		steadyHistory[i] = d
+	}
+
+	transientData := simulateTransientState(steadyStateData)
+	transientHistory := make([]models.BOGCompressorData, len(transientData))
+	for i, d := range transientData {
+		transientHistory[i] = d
+	}
+
+	steadyResult := service.diagnoseCompressor(steadyHistory[len(steadyHistory)-1], steadyHistory)
+	transientResult := service.diagnoseCompressor(transientHistory[len(transientHistory)-1], transientHistory)
+
+	isSteady, _ := service.isSteadyState(steadyHistory)
+	isTransient, _ := service.isSteadyState(transientHistory)
+
+	t.Logf("Steady state detected: %v, score: %.4f, confidence: %.2f", isSteady, steadyResult.AnomalyScore, steadyResult.Confidence)
+	t.Logf("Transient state detected: %v, score: %.4f, confidence: %.2f", !isTransient, transientResult.AnomalyScore, transientResult.Confidence)
+
+	if !isSteady {
+		t.Error("Expected steady state to be detected as steady")
+	}
+
+	if isTransient {
+		t.Error("Expected transient state to be detected as non-steady")
+	}
+
+	if transientResult.Confidence >= steadyResult.Confidence {
+		t.Errorf("Expected transient state to have lower confidence. Steady: %.2f, Transient: %.2f", steadyResult.Confidence, transientResult.Confidence)
+	}
+
+	if transientResult.AnomalyScore >= steadyResult.AnomalyScore {
+		t.Errorf("Expected transient state to have discounted anomaly score. Steady: %.4f, Transient: %.4f", steadyResult.AnomalyScore, transientResult.AnomalyScore)
+	}
+}
+
+func simulateLoadFluctuation(data []models.BOGCompressorData) []models.BOGCompressorData {
+	result := make([]models.BOGCompressorData, len(data))
+	for i, d := range data {
+		loadFactor := 0.7 + 0.6*math.Sin(float64(i)*0.3)
+		result[i] = d
+		result[i].VibrationLevel = d.VibrationLevel * loadFactor
+		result[i].MotorCurrent = d.MotorCurrent * loadFactor
+		result[i].DischargePressure = d.DischargePressure * (0.8 + loadFactor*0.2)
+	}
+	return result
+}
+
+func simulateTransientState(data []models.BOGCompressorData) []models.BOGCompressorData {
+	result := make([]models.BOGCompressorData, len(data))
+	for i, d := range data {
+		transientFactor := 1.0
+		if i > len(data)/2 {
+			transientFactor = 1.0 + 0.3*math.Sin(float64(i-len(data)/2)*0.8)
+		}
+		result[i] = d
+		result[i].VibrationLevel = d.VibrationLevel * transientFactor
+		result[i].MotorCurrent = d.MotorCurrent * transientFactor
+		result[i].DischargePressure = d.DischargePressure * transientFactor
+	}
+	return result
+}

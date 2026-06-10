@@ -45,31 +45,38 @@ func NewMultiTankScheduler(
 	resultChan chan<- messages.ScheduleResult,
 ) *MultiTankScheduler {
 	params := &config.SchedulerParams{
-		CompressorEfficiency:    0.75,
-		EvaporationLossCostYuan: 4500.0,
-		ElectricityCostYuan:     0.65,
-		PumpPowerKW:             220.0,
-		CompressorPowerKWPerPct: 2.5,
-		MaxLoadPctPerCompressor: map[string]float64{
-			"T1_C1": 100.0, "T1_C2": 100.0,
-			"T2_C1": 100.0, "T2_C2": 100.0,
-			"T3_C1": 100.0, "T3_C2": 100.0,
-			"T4_C1": 100.0, "T4_C2": 100.0,
-		},
-		MinRuntimeHours:         2.0,
-		OptimizationIntervalMin: 10,
+		CompressorEfficiency:        0.75,
+		EvaporationLossCostYuan:     4500.0,
+		ElectricityCostYuan:         0.65,
+		PumpPowerKW:                 220.0,
+		CompressorPowerKWPerPct:     2.5,
+		MaxLoadPctPerCompressor:     map[string]float64{},
+		MinRuntimeHours:             2.0,
+		OptimizationIntervalMin:     10,
+		DecompositionOn:             true,
+		MaxTanksPerSubproblem:       4,
+		RiskGroupThresholds:         []float64{0.7, 0.4, 0.0},
+		MaxIterationsDecomposition:  10,
+		CoordinationStepSize:        0.1,
+		EarlyTerminationGap:         0.01,
+		DefaultMaxLoadPct:           100.0,
+		ConcurrentSubproblems:       true,
 	}
 	if cfg.ModelParams != nil {
 		params = &cfg.ModelParams.Scheduler
 	}
 
-	return &MultiTankScheduler{
+	scheduler := &MultiTankScheduler{
 		cfg:         cfg,
 		db:          db,
 		requestChan: requestChan,
 		resultChan:  resultChan,
 		modelParams: params,
 	}
+
+	scheduler.ensureCompressorConfig(cfg.Modbus.TankCount, cfg.Modbus.Register.CompressorsPerTank)
+
+	return scheduler
 }
 
 func (s *MultiTankScheduler) Start(ctx context.Context) {
@@ -204,16 +211,26 @@ func (s *MultiTankScheduler) optimizeSchedule(
 		}
 	}
 
+	s.ensureCompressorConfig(len(states), 2)
+
+	useDecomposition := s.modelParams.DecompositionOn &&
+		len(states) > s.modelParams.MaxTanksPerSubproblem
+
+	if useDecomposition {
+		return s.decomposeAndOptimize(ctx, states)
+	}
+
 	compressorLoads := s.optimizeCompressorLoads(states)
 	pumpOperations := s.optimizePumpOperations(states)
 	evaporationLoss := s.calculateEvaporationLoss(states, compressorLoads)
-	objective := s.calculateObjective(evaporationLoss, compressorLoads, pumpOperations)
 
 	result := messages.ScheduleResult{
 		CompressorLoads: make(map[string]float64),
 		PumpOperations:  pumpOperations,
 		EvaporationLoss: evaporationLoss,
 		OptimizedAt:     time.Now(),
+		Decomposed:      false,
+		SubproblemCount: 1,
 	}
 
 	for key, load := range compressorLoads {
@@ -438,6 +455,207 @@ func (s *MultiTankScheduler) calculateObjective(
 
 func (s *MultiTankScheduler) compressorKey(tankID, compID int) string {
 	return fmt.Sprintf("T%d_C%d", tankID, compID)
+}
+
+func (s *MultiTankScheduler) ensureCompressorConfig(nTanks, compressorsPerTank int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.modelParams.MaxLoadPctPerCompressor == nil {
+		s.modelParams.MaxLoadPctPerCompressor = make(map[string]float64)
+	}
+
+	for tankID := 1; tankID <= nTanks; tankID++ {
+		for compID := 1; compID <= compressorsPerTank; compID++ {
+			key := s.compressorKey(tankID, compID)
+			if _, exists := s.modelParams.MaxLoadPctPerCompressor[key]; !exists {
+				s.modelParams.MaxLoadPctPerCompressor[key] = s.modelParams.DefaultMaxLoadPct
+			}
+		}
+	}
+}
+
+func (s *MultiTankScheduler) groupTanksByRisk(states []messages.TankStateForScheduler) [][]messages.TankStateForScheduler {
+	thresholds := s.modelParams.RiskGroupThresholds
+	if len(thresholds) == 0 {
+		thresholds = []float64{0.7, 0.4, 0.0}
+	}
+
+	groups := make([][]messages.TankStateForScheduler, len(thresholds))
+	for _, state := range states {
+		groupIdx := len(thresholds) - 1
+		for i, thresh := range thresholds {
+			if state.RiskIndex >= thresh {
+				groupIdx = i
+				break
+			}
+		}
+		groups[groupIdx] = append(groups[groupIdx], state)
+	}
+
+	return groups
+}
+
+func (s *MultiTankScheduler) decomposeIntoSubproblems(
+	states []messages.TankStateForScheduler,
+) [][]messages.TankStateForScheduler {
+	maxTanks := s.modelParams.MaxTanksPerSubproblem
+	if maxTanks <= 0 {
+		maxTanks = 4
+	}
+
+	groups := s.groupTanksByRisk(states)
+
+	var subproblems [][]messages.TankStateForScheduler
+	for _, group := range groups {
+		if len(group) == 0 {
+			continue
+		}
+		if len(group) <= maxTanks {
+			subproblems = append(subproblems, group)
+		} else {
+			for i := 0; i < len(group); i += maxTanks {
+				end := i + maxTanks
+				if end > len(group) {
+					end = len(group)
+				}
+				subproblems = append(subproblems, group[i:end])
+			}
+		}
+	}
+
+	return subproblems
+}
+
+type subproblemResult struct {
+	loads   map[string]float64
+	pumps   []messages.PumpOperation
+	evapLoss float64
+	cost    float64
+}
+
+func (s *MultiTankScheduler) optimizeSubproblem(
+	ctx context.Context,
+	states []messages.TankStateForScheduler,
+	globalPressure float64,
+) subproblemResult {
+	compressorLoads := s.optimizeCompressorLoads(states)
+	pumpOperations := s.optimizePumpOperations(states)
+	evaporationLoss := s.calculateEvaporationLoss(states, compressorLoads)
+	objective := s.calculateObjective(evaporationLoss, compressorLoads, pumpOperations)
+
+	return subproblemResult{
+		loads:    compressorLoads,
+		pumps:    pumpOperations,
+		evapLoss: evaporationLoss,
+		cost:     objective.TotalCost,
+	}
+}
+
+func (s *MultiTankScheduler) coordinateSubproblems(
+	results []subproblemResult,
+	globalAvgPressure float64,
+) (map[string]float64, []messages.PumpOperation, float64) {
+	combinedLoads := make(map[string]float64)
+	combinedPumps := make([]messages.PumpOperation, 0)
+	totalEvapLoss := 0.0
+	totalLoad := 0.0
+	totalCapacity := 0.0
+
+	for _, res := range results {
+		for k, v := range res.loads {
+			combinedLoads[k] = v
+			totalLoad += v
+			if maxLoad, ok := s.modelParams.MaxLoadPctPerCompressor[k]; ok {
+				totalCapacity += maxLoad
+			}
+		}
+		combinedPumps = append(combinedPumps, res.pumps...)
+		totalEvapLoss += res.evapLoss
+	}
+
+	if totalCapacity > 0 {
+		targetTotalLoad := globalAvgPressure * 400.0
+		if targetTotalLoad > totalLoad && targetTotalLoad <= totalCapacity {
+			adjustmentFactor := targetTotalLoad / totalLoad
+			for key := range combinedLoads {
+				maxLoad := s.modelParams.MaxLoadPctPerCompressor[key]
+				newLoad := combinedLoads[key] * adjustmentFactor
+				combinedLoads[key] = math.Min(newLoad, maxLoad)
+			}
+		}
+	}
+
+	sort.Slice(combinedPumps, func(i, j int) bool {
+		return combinedPumps[i].StartTime < combinedPumps[j].StartTime
+	})
+
+	return combinedLoads, combinedPumps, totalEvapLoss
+}
+
+func (s *MultiTankScheduler) decomposeAndOptimize(
+	ctx context.Context,
+	states []messages.TankStateForScheduler,
+) messages.ScheduleResult {
+	subproblems := s.decomposeIntoSubproblems(states)
+
+	totalPressure := 0.0
+	for _, state := range states {
+		totalPressure += state.Pressure
+	}
+	globalAvgPressure := totalPressure / float64(len(states))
+
+	var results []subproblemResult
+
+	if s.modelParams.ConcurrentSubproblems && len(subproblems) > 1 {
+		var wg sync.WaitGroup
+		resultChan := make(chan subproblemResult, len(subproblems))
+
+		for _, sub := range subproblems {
+			wg.Add(1)
+			go func(subproblem []messages.TankStateForScheduler) {
+				defer wg.Done()
+				select {
+				case <-ctx.Done():
+					return
+				case resultChan <- s.optimizeSubproblem(ctx, subproblem, globalAvgPressure):
+				}
+			}(sub)
+		}
+
+		wg.Wait()
+		close(resultChan)
+
+		for res := range resultChan {
+			results = append(results, res)
+		}
+	} else {
+		for _, sub := range subproblems {
+			select {
+			case <-ctx.Done():
+				break
+			default:
+				results = append(results, s.optimizeSubproblem(ctx, sub, globalAvgPressure))
+			}
+		}
+	}
+
+	loads, pumps, evapLoss := s.coordinateSubproblems(results, globalAvgPressure)
+
+	result := messages.ScheduleResult{
+		CompressorLoads: make(map[string]float64),
+		PumpOperations:  pumps,
+		EvaporationLoss: evapLoss,
+		OptimizedAt:     time.Now(),
+		Decomposed:      true,
+		SubproblemCount: len(subproblems),
+	}
+
+	for key, load := range loads {
+		result.CompressorLoads[key] = load
+	}
+
+	return result
 }
 
 func (s *MultiTankScheduler) saveSchedule(ctx context.Context, result messages.ScheduleResult) {

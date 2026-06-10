@@ -133,6 +133,11 @@ type HeatLeakResult struct {
 	ErrorMessage           string
 }
 
+type FlowRateChange struct {
+	ChangeTimeHours float64
+	NewFlowRate     float64
+}
+
 type UnloadingRequest struct {
 	TankID              int
 	UnloadingRate       float64
@@ -142,6 +147,7 @@ type UnloadingRequest struct {
 	InitialDensities    []float64
 	EstimatedDuration   float64
 	RequestedAt         time.Time
+	FlowRateChanges     []FlowRateChange
 }
 
 type UnloadingPrediction struct {
@@ -178,6 +184,8 @@ type ScheduleResult struct {
 	EvaporationLoss   float64
 	OptimizedAt       time.Time
 	ErrorMessage      string
+	Decomposed        bool
+	SubproblemCount   int
 }
 
 type PumpOperation struct {

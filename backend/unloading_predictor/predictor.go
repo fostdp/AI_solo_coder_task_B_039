@@ -43,14 +43,21 @@ func NewUnloadingPredictor(
 	resultChan chan<- messages.UnloadingPrediction,
 ) *UnloadingPredictor {
 	params := &config.UnloadingParams{
-		MixingEfficiency:      0.85,
-		PumpFlowRateM3H:       800.0,
-		MinPumpDurationHours:  0.5,
-		MaxStratificationSafe: 3.0,
-		PredictionTimeStepMin: 5,
-		NumVerticalLayers:     20,
-		AxialDispersionCoeff:  0.05,
-		DensityDiffusionCoeff: 1.0e-8,
+		MixingEfficiency:          0.85,
+		PumpFlowRateM3H:           800.0,
+		MinPumpDurationHours:      0.5,
+		MaxStratificationSafe:     3.0,
+		PredictionTimeStepMin:     5,
+		NumVerticalLayers:         20,
+		AxialDispersionCoeff:      0.05,
+		DensityDiffusionCoeff:     1.0e-8,
+		AdaptiveFilteringOn:       true,
+		FlowRateChangeThreshold:   0.2,
+		MaxMixingEfficiencyBoost:  0.15,
+		FlowSmoothingAlpha:        0.3,
+		ResponseTimeSteps:         3,
+		MinAxialDispersionBoost:   1.0,
+		MaxAxialDispersionBoost:   3.0,
 	}
 	if cfg.ModelParams != nil {
 		params = &cfg.ModelParams.Unloading
@@ -125,6 +132,9 @@ func (p *UnloadingPredictor) predictUnloading(
 	predictedDensities := make([][]float64, totalSteps)
 	timeSteps := make([]float64, totalSteps)
 
+	responseSteps := p.modelParams.ResponseTimeSteps
+	flowHistory := make([]float64, 0, responseSteps)
+
 	for t := 0; t < totalSteps; t++ {
 		timeSteps[t] = float64(t) * timeStep
 
@@ -138,7 +148,34 @@ func (p *UnloadingPredictor) predictUnloading(
 		predictedDensities[t] = currentDensities
 
 		if t < totalSteps-1 {
-			p.advanceTimeStep(model, initialState, req, timeStep, t)
+			actualFlow := req.UnloadingRate
+			if t > 0 && req.FlowRateChanges != nil && len(req.FlowRateChanges) > 0 {
+				elapsedHours := float64(t) * timeStep
+				for _, change := range req.FlowRateChanges {
+					if math.Abs(elapsedHours-change.ChangeTimeHours) < timeStep*0.5 {
+						actualFlow = change.NewFlowRate
+						break
+					}
+				}
+			}
+
+			smoothedFlow := p.smoothFlowRate(actualFlow, flowHistory)
+			flowChangeRate := p.calculateFlowChangeRate(actualFlow, flowHistory)
+
+			adaptiveMixing, adaptiveDispersion := p.calculateAdaptiveParameters(flowChangeRate)
+
+			model.mixingEfficiency = adaptiveMixing
+			model.axialDispersion = adaptiveDispersion
+
+			flowHistory = append(flowHistory, actualFlow)
+			if len(flowHistory) > responseSteps {
+				flowHistory = flowHistory[1:]
+			}
+
+			adaptiveReq := req
+			adaptiveReq.UnloadingRate = smoothedFlow
+
+			p.advanceTimeStep(model, initialState, adaptiveReq, timeStep, t)
 		}
 	}
 
@@ -351,6 +388,70 @@ func (p *UnloadingPredictor) findInjectionLayer(state []LayerState, unloadingDen
 		}
 	}
 	return len(state) - 1
+}
+
+func (p *UnloadingPredictor) smoothFlowRate(
+	currentFlow float64,
+	flowHistory []float64,
+) float64 {
+	if !p.modelParams.AdaptiveFilteringOn || len(flowHistory) == 0 {
+		return currentFlow
+	}
+
+	alpha := p.modelParams.FlowSmoothingAlpha
+	smoothed := currentFlow
+	for i := len(flowHistory) - 1; i >= 0; i-- {
+		smoothed = alpha*smoothed + (1-alpha)*flowHistory[i]
+	}
+
+	return smoothed
+}
+
+func (p *UnloadingPredictor) calculateFlowChangeRate(
+	currentFlow float64,
+	flowHistory []float64,
+) float64 {
+	if len(flowHistory) < 2 {
+		return 0
+	}
+
+	n := len(flowHistory)
+	avgFlow := 0.0
+	for _, f := range flowHistory {
+		avgFlow += f
+	}
+	avgFlow /= float64(n)
+
+	if avgFlow < 0.01 {
+		return 0
+	}
+
+	return math.Abs(currentFlow-avgFlow) / avgFlow
+}
+
+func (p *UnloadingPredictor) calculateAdaptiveParameters(
+	flowChangeRate float64,
+) (float64, float64) {
+	if !p.modelParams.AdaptiveFilteringOn {
+		return p.modelParams.MixingEfficiency, p.modelParams.AxialDispersionCoeff
+	}
+
+	threshold := p.modelParams.FlowRateChangeThreshold
+	if flowChangeRate < threshold {
+		return p.modelParams.MixingEfficiency, p.modelParams.AxialDispersionCoeff
+	}
+
+	excessRate := (flowChangeRate - threshold) / threshold
+	boostFactor := math.Min(1.0, excessRate)
+
+	adaptiveMixingEfficiency := p.modelParams.MixingEfficiency *
+		(1.0 + boostFactor*p.modelParams.MaxMixingEfficiencyBoost)
+
+	dispersionBoost := p.modelParams.MinAxialDispersionBoost +
+		boostFactor*(p.modelParams.MaxAxialDispersionBoost-p.modelParams.MinAxialDispersionBoost)
+	adaptiveDispersion := p.modelParams.AxialDispersionCoeff * dispersionBoost
+
+	return math.Min(1.0, adaptiveMixingEfficiency), adaptiveDispersion
 }
 
 func (p *UnloadingPredictor) calculateMaxDifferences(

@@ -34,17 +34,23 @@ func NewHeatLeakEvaluator(
 	cfg *config.Config,
 	db *database.DB,
 	requestChan <-chan messages.HeatLeakRequest,
-	resultChan chan<- messages.HeatLeakResult,
+	resultChan  chan<- messages.HeatLeakResult,
 ) *HeatLeakEvaluator {
 	params := &config.HeatLeakParams{
-		ReferenceConductivity: 0.025,
-		InsulationThickness:   0.8,
-		WarningThresholdPct:   cfg.HeatLeak.WarningThresholdPct,
-		EvaluationIntervalHours: 1,
-		HistoryWindowHours:    cfg.HeatLeak.HistoryWindowHours,
-		SurfaceAreaSqM:        25000.0,
-		MaxHeatLoadKW:         150.0,
-		CalibrationIntervalDays: 90,
+		ReferenceConductivity:    0.025,
+		InsulationThickness:      0.8,
+		WarningThresholdPct:      cfg.HeatLeak.WarningThresholdPct,
+		EvaluationIntervalHours:  1,
+		HistoryWindowHours:       cfg.HeatLeak.HistoryWindowHours,
+		SurfaceAreaSqM:           25000.0,
+		MaxHeatLoadKW:            150.0,
+		CalibrationIntervalDays:  90,
+		SlidingWindowSize:        6,
+		AmbientTempSmoothAlpha:   0.3,
+		BaseRegularizationLambda: 0.01,
+		AdaptiveRegularizationOn: true,
+		TempChangeRateThreshold:  0.5,
+		MaxRegularizationLambda:  0.1,
 	}
 	if cfg.ModelParams != nil {
 		params = &cfg.ModelParams.HeatLeak
@@ -140,15 +146,24 @@ func (e *HeatLeakEvaluator) evaluateHeatLeak(
 		}
 	}
 
-	layerData := e.organizeByLayer(tempHistory)
+	ambientHistory, _ := e.db.GetAmbientTempHistory(ctx, e.modelParams.SlidingWindowSize)
+	ambientChangeRate := e.calculateAmbientChangeRate(ambientHistory)
+	smoothedAmbient := e.smoothAmbientTemperature(ambientTemp, ambientHistory)
+
+	smoothedHistory := e.slidingWindowSmooth(tempHistory)
+	layerData := e.organizeByLayer(smoothedHistory)
 	innerTemp := e.calculateInnerAverageTemp(layerData)
 	layerHeatRates := e.calculateLayerHeatRates(layerData)
 
+	adaptiveLambda := e.calculateAdaptiveLambda(ambientChangeRate)
+
 	referenceK := e.getCalibratedK(tankID)
-	equivalentK, leakRegions := e.solveInverseProblem(layerHeatRates, layerData, innerTemp, ambientTemp, referenceK)
+	equivalentK, leakRegions := e.solveInverseProblem(
+		layerHeatRates, layerData, innerTemp, smoothedAmbient, referenceK, adaptiveLambda,
+	)
 
 	insulationPerformance := e.calculateInsulationPerformance(equivalentK, referenceK)
-	heatLeakRate := e.calculateTotalHeatLeakRate(equivalentK, innerTemp, ambientTemp)
+	heatLeakRate := e.calculateTotalHeatLeakRate(equivalentK, innerTemp, smoothedAmbient)
 	totalHeatLoad := heatLeakRate / 3600.0
 
 	warningThreshold := (100.0 - e.modelParams.WarningThresholdPct) / 100.0
@@ -216,14 +231,112 @@ func (e *HeatLeakEvaluator) calculateLayerHeatRates(layerData map[int][]models.L
 	return heatRates
 }
 
+func (e *HeatLeakEvaluator) smoothAmbientTemperature(
+	ambientTemp float64,
+	ambientHistory []float64,
+) float64 {
+	if len(ambientHistory) == 0 {
+		return ambientTemp
+	}
+
+	alpha := e.modelParams.AmbientTempSmoothAlpha
+	smoothed := ambientTemp
+	for i := len(ambientHistory) - 1; i >= 0; i-- {
+		smoothed = alpha*smoothed + (1-alpha)*ambientHistory[i]
+	}
+
+	return smoothed
+}
+
+func (e *HeatLeakEvaluator) slidingWindowSmooth(
+	data []models.LayerSummary,
+) []models.LayerSummary {
+	windowSize := e.modelParams.SlidingWindowSize
+	if windowSize <= 1 || len(data) < windowSize {
+		return data
+	}
+
+	smoothed := make([]models.LayerSummary, len(data))
+	for i := range data {
+		start := i - windowSize/2
+		if start < 0 {
+			start = 0
+		}
+		end := start + windowSize
+		if end > len(data) {
+			end = len(data)
+			start = end - windowSize
+			if start < 0 {
+				start = 0
+			}
+		}
+
+		var sumTemp, sumDens float64
+		count := 0
+		for j := start; j < end; j++ {
+			sumTemp += data[j].AvgTemp
+			sumDens += data[j].AvgDensity
+			count++
+		}
+
+		smoothed[i] = data[i]
+		if count > 0 {
+			smoothed[i].AvgTemp = sumTemp / float64(count)
+			smoothed[i].AvgDensity = sumDens / float64(count)
+		}
+	}
+
+	return smoothed
+}
+
+func (e *HeatLeakEvaluator) calculateAmbientChangeRate(
+	ambientHistory []float64,
+) float64 {
+	if len(ambientHistory) < 2 {
+		return 0
+	}
+
+	n := len(ambientHistory)
+	var sumX, sumY, sumXY, sumX2 float64
+	for i, t := range ambientHistory {
+		x := float64(i)
+		y := t
+		sumX += x
+		sumY += y
+		sumXY += x * y
+		sumX2 += x * x
+	}
+
+	slope := (float64(n)*sumXY - sumX*sumY) / (float64(n)*sumX2 - sumX*sumX)
+	return math.Abs(slope)
+}
+
+func (e *HeatLeakEvaluator) calculateAdaptiveLambda(
+	ambientChangeRate float64,
+) float64 {
+	if !e.modelParams.AdaptiveRegularizationOn {
+		return e.modelParams.BaseRegularizationLambda
+	}
+
+	lambda := e.modelParams.BaseRegularizationLambda
+	if ambientChangeRate > e.modelParams.TempChangeRateThreshold {
+		factor := ambientChangeRate / e.modelParams.TempChangeRateThreshold
+		lambda = e.modelParams.BaseRegularizationLambda * math.Min(factor, 10.0)
+	}
+
+	return math.Min(lambda, e.modelParams.MaxRegularizationLambda)
+}
+
 func (e *HeatLeakEvaluator) calculateTemperatureTrend(data []models.LayerSummary) float64 {
 	n := len(data)
 	if n < 2 {
 		return 0
 	}
 
+	smoothedData := e.slidingWindowSmooth(data)
+
 	var sumX, sumY, sumXY, sumX2 float64
-	for i, d := range data {
+	for i, d := range smoothedData {
 		x := float64(i)
 		y := d.AvgTemp
 		sumX += x
@@ -234,8 +347,8 @@ func (e *HeatLeakEvaluator) calculateTemperatureTrend(data []models.LayerSummary
 
 	slope := (float64(n)*sumXY - sumX*sumY) / (float64(n)*sumX2 - sumX*sumX)
 
-	if len(data) >= 2 {
-		timeDiff := data[len(data)-1].Time.Sub(data[0].Time).Seconds()
+	if len(smoothedData) >= 2 {
+		timeDiff := smoothedData[len(smoothedData)-1].Time.Sub(smoothedData[0].Time).Seconds()
 		if timeDiff > 0 {
 			slope = slope / timeDiff * 30.0
 		}
@@ -248,9 +361,10 @@ func (e *HeatLeakEvaluator) solveInverseProblem(
 	layerHeatRates map[int]float64,
 	layerData map[int][]models.LayerSummary,
 	innerTemp, ambientTemp, referenceK float64,
+	adaptiveLambda float64,
 ) (float64, []int) {
 	solver := &InverseSolver{
-		lambda:              0.01,
+		lambda:              adaptiveLambda,
 		maxIter:             100,
 		tolerance:           1e-6,
 		referenceK:          referenceK,

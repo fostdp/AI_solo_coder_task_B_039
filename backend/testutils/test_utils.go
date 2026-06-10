@@ -111,15 +111,10 @@ func GenerateNormalBOGData(nSamples int, compressorID int) []models.BOGCompresso
 			Time:              baseTime.Add(time.Duration(i) * time.Minute),
 			TankID:            1,
 			CompressorID:      compressorID,
-			Vibration:         1.5 + rng.NormFloat64()*0.3,
-			Current:           30.0 + rng.NormFloat64()*3.0,
-			Temperature:       85.0 + rng.NormFloat64()*5.0,
-			Pressure:          0.15 + rng.NormFloat64()*0.02,
-			FlowRate:          500.0 + rng.NormFloat64()*50.0,
-			RuntimeHours:      float64(i) / 60.0,
-			OilTemperature:    65.0 + rng.NormFloat64()*3.0,
-			DischargePressure: 1.2 + rng.NormFloat64()*0.1,
-			SuctionPressure:   0.12 + rng.NormFloat64()*0.01,
+			RunningStatus:     1,
+			VibrationLevel:    1.5 + rng.NormFloat64()*0.3,
+			MotorCurrent:      30.0 + rng.NormFloat64()*3.0,
+			DischargePressure: 0.15 + rng.NormFloat64()*0.02,
 		}
 	}
 	return data
@@ -129,9 +124,8 @@ func GenerateBearingFaultData(nSamples int, compressorID int, severity float64) 
 	data := GenerateNormalBOGData(nSamples, compressorID)
 	for i := range data {
 		faultFactor := 1.0 + severity*float64(i)/float64(nSamples)
-		data[i].Vibration = 3.0 + rng.NormFloat64()*0.8*faultFactor
-		data[i].Temperature = 95.0 + rng.NormFloat64()*8.0*faultFactor
-		data[i].OilTemperature = 75.0 + rng.NormFloat64()*5.0*faultFactor
+		data[i].VibrationLevel = 3.0 + rng.NormFloat64()*0.8*faultFactor
+		data[i].MotorCurrent = 35.0 + rng.NormFloat64()*4.0*faultFactor
 	}
 	return data
 }
@@ -140,10 +134,8 @@ func GeneratePistonRingWearData(nSamples int, compressorID int, severity float64
 	data := GenerateNormalBOGData(nSamples, compressorID)
 	for i := range data {
 		faultFactor := 1.0 + severity*float64(i)/float64(nSamples)
-		data[i].Current = 45.0 + rng.NormFloat64()*5.0*faultFactor
-		data[i].Pressure = 0.12 + rng.NormFloat64()*0.03*faultFactor
-		data[i].FlowRate = 400.0 + rng.NormFloat64()*60.0*faultFactor
-		data[i].DischargePressure = 1.0 + rng.NormFloat64()*0.15*faultFactor
+		data[i].MotorCurrent = 45.0 + rng.NormFloat64()*5.0*faultFactor
+		data[i].DischargePressure = 0.12 + rng.NormFloat64()*0.03*faultFactor
 	}
 	return data
 }
@@ -152,8 +144,8 @@ func GenerateImbalanceData(nSamples int, compressorID int, severity float64) []m
 	data := GenerateNormalBOGData(nSamples, compressorID)
 	for i := range data {
 		faultFactor := 1.0 + severity*float64(i)/float64(nSamples)
-		data[i].Vibration = 2.5 + rng.NormFloat64()*0.6*faultFactor
-		data[i].Current = 35.0 + rng.NormFloat64()*4.0*faultFactor
+		data[i].VibrationLevel = 2.5 + rng.NormFloat64()*0.6*faultFactor
+		data[i].MotorCurrent = 35.0 + rng.NormFloat64()*4.0*faultFactor
 	}
 	return data
 }
@@ -307,56 +299,84 @@ func NewTestConfig() *config.Config {
 				LayerHeights:        []float64{2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0, 22.0, 24.0, 26.0, 28.0, 30.0, 32.0, 34.0, 36.0, 38.0, 40.0},
 			},
 			BOGDiagnostic: config.BOGDiagnosticParams{
-				ContaminationRate:     0.1,
-				NormalVibrationRange:  [2]float64{0.5, 3.0},
-				NormalCurrentRange:    [2]float64{15.0, 45.0},
-				AnomalyThreshold:      0.7,
-				WarningThreshold:      0.5,
-				HistoryWindowHours:    24,
-				TrendWindowPoints:     50,
-				IForestNTrees:         100,
-				IForestSampleSize:     256,
+				ContaminationRate:      0.1,
+				NormalVibrationRange:   [2]float64{0.5, 3.0},
+				NormalCurrentRange:     [2]float64{15.0, 45.0},
+				AnomalyThreshold:       0.7,
+				WarningThreshold:       0.5,
+				HistoryWindowHours:     24,
+				TrendWindowPoints:      50,
+				IForestNTrees:          100,
+				IForestSampleSize:      256,
 				FaultTypeThresholds: map[string]float64{
 					"bearing_fault":      0.65,
 					"piston_ring_wear":   0.60,
 					"imbalance":          0.55,
 					"motor_fault":        0.70,
 				},
+				RatedCurrent:           50.0,
+				RatedPressure:          0.25,
+				SteadyStateWindow:      10,
+				SteadyStateCurrThresh:  0.5,
+				SteadyStatePressThresh: 0.005,
+				LoadNormalizationOn:    true,
+				TransientScoreDiscount: 0.3,
 			},
 			HeatLeak: config.HeatLeakParams{
-				ReferenceConductivity:   0.025,
-				InsulationThickness:     0.8,
-				WarningThresholdPct:     20.0,
-				EvaluationIntervalHours: 1,
-				HistoryWindowHours:      24,
-				SurfaceAreaSqM:          25000.0,
-				MaxHeatLoadKW:           150.0,
-				CalibrationIntervalDays: 90,
+				ReferenceConductivity:    0.025,
+				InsulationThickness:      0.8,
+				WarningThresholdPct:      20.0,
+				EvaluationIntervalHours:  1,
+				HistoryWindowHours:       24,
+				SurfaceAreaSqM:           25000.0,
+				MaxHeatLoadKW:            150.0,
+				CalibrationIntervalDays:  90,
+				SlidingWindowSize:        6,
+				AmbientTempSmoothAlpha:   0.3,
+				BaseRegularizationLambda: 0.01,
+				AdaptiveRegularizationOn: true,
+				TempChangeRateThreshold:  0.5,
+				MaxRegularizationLambda:  0.1,
 			},
 			Unloading: config.UnloadingParams{
-				MixingEfficiency:      0.85,
-				PumpFlowRateM3H:       800.0,
-				MinPumpDurationHours:  0.5,
-				MaxStratificationSafe: 3.0,
-				PredictionTimeStepMin: 5,
-				NumVerticalLayers:     20,
-				AxialDispersionCoeff:  0.05,
-				DensityDiffusionCoeff: 1.0e-8,
+				MixingEfficiency:          0.85,
+				PumpFlowRateM3H:           800.0,
+				MinPumpDurationHours:      0.5,
+				MaxStratificationSafe:     3.0,
+				PredictionTimeStepMin:     5,
+				NumVerticalLayers:         20,
+				AxialDispersionCoeff:      0.05,
+				DensityDiffusionCoeff:     1.0e-8,
+				AdaptiveFilteringOn:       true,
+				FlowRateChangeThreshold:   0.2,
+				MaxMixingEfficiencyBoost:  0.15,
+				FlowSmoothingAlpha:        0.3,
+				ResponseTimeSteps:         3,
+				MinAxialDispersionBoost:   1.0,
+				MaxAxialDispersionBoost:   3.0,
 			},
 			Scheduler: config.SchedulerParams{
-				CompressorEfficiency:    0.75,
-				EvaporationLossCostYuan: 4500.0,
-				ElectricityCostYuan:     0.65,
-				PumpPowerKW:             220.0,
-				CompressorPowerKWPerPct: 2.5,
-				MaxLoadPctPerCompressor: map[string]float64{
+				CompressorEfficiency:        0.75,
+				EvaporationLossCostYuan:     4500.0,
+				ElectricityCostYuan:         0.65,
+				PumpPowerKW:                 220.0,
+				CompressorPowerKWPerPct:     2.5,
+				MaxLoadPctPerCompressor:     map[string]float64{
 					"T1_C1": 100.0, "T1_C2": 100.0,
 					"T2_C1": 100.0, "T2_C2": 100.0,
 					"T3_C1": 100.0, "T3_C2": 100.0,
 					"T4_C1": 100.0, "T4_C2": 100.0,
 				},
-				MinRuntimeHours:         2.0,
-				OptimizationIntervalMin: 10,
+				MinRuntimeHours:             2.0,
+				OptimizationIntervalMin:     10,
+				DecompositionOn:             true,
+				MaxTanksPerSubproblem:       4,
+				RiskGroupThresholds:         []float64{0.7, 0.4, 0.0},
+				MaxIterationsDecomposition:  10,
+				CoordinationStepSize:        0.1,
+				EarlyTerminationGap:         0.01,
+				DefaultMaxLoadPct:           100.0,
+				ConcurrentSubproblems:       true,
 			},
 		},
 	}

@@ -68,6 +68,13 @@ func NewBOGDiagnosticService(
 			"imbalance":          0.55,
 			"motor_fault":        0.70,
 		},
+		RatedCurrent:           50.0,
+		RatedPressure:          0.25,
+		SteadyStateWindow:      10,
+		SteadyStateCurrThresh:  0.5,
+		SteadyStatePressThresh: 0.005,
+		LoadNormalizationOn:    true,
+		TransientScoreDiscount: 0.3,
 	}
 	if cfg.ModelParams != nil {
 		params = &cfg.ModelParams.BOGDiagnostic
@@ -313,8 +320,17 @@ func (s *BOGDiagnosticService) diagnoseCompressor(
 	data models.BOGCompressorData,
 	history []models.BOGCompressorData,
 ) messages.BOGDiagnosticResult {
+	isSteady, stabilityScore := s.isSteadyState(history)
+	load := s.estimateLoad(data)
+
 	features := s.extractFeatures(data, history)
-	anomalyScore := s.iforest.AnomalyScore(features)
+	rawAnomalyScore := s.iforest.AnomalyScore(features)
+
+	anomalyScore := rawAnomalyScore
+	if !isSteady {
+		discount := s.modelParams.TransientScoreDiscount * (1.0 - stabilityScore)
+		anomalyScore = math.Max(0, rawAnomalyScore-discount)
+	}
 
 	vibTrend := s.calculateTrend(history, "vibration")
 	currTrend := s.calculateTrend(history, "current")
@@ -322,8 +338,15 @@ func (s *BOGDiagnosticService) diagnoseCompressor(
 	anomalyType := s.classifyFaultType(features, anomalyScore, vibTrend, currTrend)
 	isAnomaly := anomalyScore > s.modelParams.AnomalyThreshold
 	confidence := s.calculateConfidence(anomalyScore, features)
+	if !isSteady {
+		confidence *= stabilityScore
+	}
 	remainingHours := s.estimateRemainingLife(anomalyScore, vibTrend, currTrend)
 	recommendation := s.generateRecommendation(isAnomaly, anomalyType, anomalyScore, remainingHours)
+
+	if !isSteady && isAnomaly {
+		recommendation += "（注：当前处于负荷波动期，诊断结果仅供参考，建议稳态后复查）"
+	}
 
 	return messages.BOGDiagnosticResult{
 		TankID:         tankID,
@@ -344,12 +367,20 @@ func (s *BOGDiagnosticService) extractFeatures(
 ) []float64 {
 	features := make([]float64, 8)
 
-	features[0] = data.VibrationLevel
-	features[1] = data.MotorCurrent
-	features[2] = data.DischargePressure
+	load := s.estimateLoad(data)
+	normVib, normCurr, normPress := s.normalizeByLoad(
+		data.VibrationLevel,
+		data.MotorCurrent,
+		data.DischargePressure,
+		load,
+	)
 
-	vibNorm := s.normalize(data.VibrationLevel, s.modelParams.NormalVibrationRange[0], s.modelParams.NormalVibrationRange[1])
-	currNorm := s.normalize(data.MotorCurrent, s.modelParams.NormalCurrentRange[0], s.modelParams.NormalCurrentRange[1])
+	features[0] = normVib
+	features[1] = normCurr
+	features[2] = normPress
+
+	vibNorm := s.normalize(normVib, 0.5, 1.5)
+	currNorm := s.normalize(normCurr, 0.5, 1.5)
 	features[3] = vibNorm
 	features[4] = currNorm
 
@@ -388,6 +419,69 @@ func (s *BOGDiagnosticService) normalize(value, min, max float64) float64 {
 		return 0.5
 	}
 	return (value - min) / rangeVal
+}
+
+func (s *BOGDiagnosticService) estimateLoad(data models.BOGCompressorData) float64 {
+	currLoad := s.normalize(data.MotorCurrent, s.modelParams.NormalCurrentRange[0], s.modelParams.RatedCurrent)
+	pressLoad := s.normalize(data.DischargePressure, 0.1, s.modelParams.RatedPressure)
+	return math.Min(1.0, (currLoad*0.6+pressLoad*0.4))
+}
+
+func (s *BOGDiagnosticService) isSteadyState(history []models.BOGCompressorData) (bool, float64) {
+	n := s.modelParams.SteadyStateWindow
+	if n > len(history) {
+		n = len(history)
+	}
+	if n < 3 {
+		return false, 0.0
+	}
+
+	recent := history[len(history)-n:]
+	var currMean, pressMean float64
+	for _, d := range recent {
+		currMean += d.MotorCurrent
+		pressMean += d.DischargePressure
+	}
+	currMean /= float64(n)
+	pressMean /= float64(n)
+
+	var currStd, pressStd float64
+	for _, d := range recent {
+		currStd += math.Pow(d.MotorCurrent-currMean, 2)
+		pressStd += math.Pow(d.DischargePressure-pressMean, 2)
+	}
+	currStd = math.Sqrt(currStd / float64(n-1))
+	pressStd = math.Sqrt(pressStd / float64(n-1))
+
+	currStable := currStd < s.modelParams.SteadyStateCurrThresh
+	pressStable := pressStd < s.modelParams.SteadyStatePressThresh
+
+	stabilityScore := 1.0 - math.Min(1.0,
+		(currStd/s.modelParams.SteadyStateCurrThresh*0.5+
+			pressStd/s.modelParams.SteadyStatePressThresh*0.5))
+
+	return currStable && pressStable, stabilityScore
+}
+
+func (s *BOGDiagnosticService) normalizeByLoad(
+	vibration, current, pressure float64,
+	load float64,
+) (float64, float64, float64) {
+	if !s.modelParams.LoadNormalizationOn || load < 0.1 {
+		return vibration, current, pressure
+	}
+
+	baseVib := s.modelParams.NormalVibrationRange[0] +
+		load*(s.modelParams.NormalVibrationRange[1]-s.modelParams.NormalVibrationRange[0])*0.8
+	baseCurr := s.modelParams.NormalCurrentRange[0] +
+		load*(s.modelParams.RatedCurrent-s.modelParams.NormalCurrentRange[0])
+	basePress := 0.1 + load*(s.modelParams.RatedPressure-0.1)
+
+	normVib := vibration / math.Max(0.1, baseVib)
+	normCurr := current / math.Max(1.0, baseCurr)
+	normPress := pressure / math.Max(0.01, basePress)
+
+	return normVib, normCurr, normPress
 }
 
 func (s *BOGDiagnosticService) calculateTrend(history []models.BOGCompressorData, metric string) float64 {

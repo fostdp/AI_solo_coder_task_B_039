@@ -895,3 +895,178 @@ func TestCompressorKey(t *testing.T) {
 		}
 	}
 }
+
+func TestRootCause_DecompositionScalability(t *testing.T) {
+	cfg := testutils.NewTestConfig()
+	scheduler := NewMultiTankScheduler(cfg, nil, nil, nil)
+
+	smallTankCount := 4
+	largeTankCount := 20
+
+	smallStates := testutils.GenerateTankStatesForScheduler(smallTankCount, "random")
+	largeStates := testutils.GenerateTankStatesForScheduler(largeTankCount, "random")
+
+	scheduler.modelParams.DecompositionOn = false
+	startSmallNoDecomp := time.Now()
+	resultSmallNoDecomp := scheduler.optimizeSchedule(nil, smallStates)
+	durationSmallNoDecomp := time.Since(startSmallNoDecomp)
+
+	startLargeNoDecomp := time.Now()
+	resultLargeNoDecomp := scheduler.optimizeSchedule(nil, largeStates)
+	durationLargeNoDecomp := time.Since(startLargeNoDecomp)
+
+	scheduler.modelParams.DecompositionOn = true
+	startSmallWithDecomp := time.Now()
+	resultSmallWithDecomp := scheduler.optimizeSchedule(nil, smallStates)
+	durationSmallWithDecomp := time.Since(startSmallWithDecomp)
+
+	startLargeWithDecomp := time.Now()
+	resultLargeWithDecomp := scheduler.optimizeSchedule(nil, largeStates)
+	durationLargeWithDecomp := time.Since(startLargeWithDecomp)
+
+	t.Logf("Small problem (%d tanks):", smallTankCount)
+	t.Logf("  Without decomposition: %v, decomposed: %v", durationSmallNoDecomp, resultSmallNoDecomp.Decomposed)
+	t.Logf("  With decomposition: %v, decomposed: %v, subproblems: %d", durationSmallWithDecomp, resultSmallWithDecomp.Decomposed, resultSmallWithDecomp.SubproblemCount)
+
+	t.Logf("Large problem (%d tanks):", largeTankCount)
+	t.Logf("  Without decomposition: %v, decomposed: %v", durationLargeNoDecomp, resultLargeNoDecomp.Decomposed)
+	t.Logf("  With decomposition: %v, decomposed: %v, subproblems: %d", durationLargeWithDecomp, resultLargeWithDecomp.Decomposed, resultLargeWithDecomp.SubproblemCount)
+
+	if resultSmallWithDecomp.Decomposed {
+		t.Error("Small problem should not use decomposition")
+	}
+
+	if !resultLargeWithDecomp.Decomposed {
+		t.Error("Large problem should use decomposition")
+	}
+
+	if resultLargeWithDecomp.SubproblemCount < 2 {
+		t.Errorf("Expected at least 2 subproblems for large problem, got %d", resultLargeWithDecomp.SubproblemCount)
+	}
+
+	scalabilityRatioNoDecomp := float64(durationLargeNoDecomp) / float64(durationSmallNoDecomp)
+	scalabilityRatioWithDecomp := float64(durationLargeWithDecomp) / float64(durationSmallWithDecomp)
+	tankCountRatio := float64(largeTankCount) / float64(smallTankCount)
+
+	t.Logf("Scalability ratio (large/small time):")
+	t.Logf("  Without decomposition: %.2fx (tank ratio: %.2fx)", scalabilityRatioNoDecomp, tankCountRatio)
+	t.Logf("  With decomposition: %.2fx (tank ratio: %.2fx)", scalabilityRatioWithDecomp, tankCountRatio)
+
+	if scalabilityRatioWithDecomp >= scalabilityRatioNoDecomp {
+		t.Errorf("Decomposition should improve scalability. Without: %.2fx, With: %.2fx", scalabilityRatioNoDecomp, scalabilityRatioWithDecomp)
+	}
+
+	expectedEvapNoDecomp := resultLargeNoDecomp.EvaporationLoss
+	expectedEvapWithDecomp := resultLargeWithDecomp.EvaporationLoss
+	evapDiff := math.Abs(expectedEvapNoDecomp - expectedEvapWithDecomp) / expectedEvapNoDecomp
+
+	t.Logf("Evaporation loss: without decomp=%.2f, with decomp=%.2f, diff=%.2f%%",
+		expectedEvapNoDecomp, expectedEvapWithDecomp, evapDiff*100)
+
+	if evapDiff > 0.25 {
+		t.Errorf("Decomposition result differs too much from centralized. Diff: %.2f%%, expected < 25%%", evapDiff*100)
+	}
+}
+
+func TestRootCause_RiskGrouping(t *testing.T) {
+	cfg := testutils.NewTestConfig()
+	scheduler := NewMultiTankScheduler(cfg, nil, nil, nil)
+
+	states := testutils.GenerateTankStatesForScheduler(12, "risk_bands")
+
+	groups := scheduler.groupTanksByRisk(states)
+
+	t.Logf("Group count: %d", len(groups))
+	for i, group := range groups {
+		t.Logf("  Group %d: %d tanks, thresholds >= %.2f", i, len(group), scheduler.modelParams.RiskGroupThresholds[i])
+	}
+
+	if len(groups) != len(scheduler.modelParams.RiskGroupThresholds) {
+		t.Errorf("Expected %d groups, got %d", len(scheduler.modelParams.RiskGroupThresholds), len(groups))
+	}
+
+	for i, group := range groups {
+		threshold := scheduler.modelParams.RiskGroupThresholds[i]
+		for _, state := range group {
+			if i > 0 {
+				prevThreshold := scheduler.modelParams.RiskGroupThresholds[i-1]
+				if state.RiskIndex >= prevThreshold {
+					t.Errorf("Tank %d with risk %.2f in wrong group %d (should be in group %d)",
+						state.TankID, state.RiskIndex, i, i-1)
+				}
+			}
+			if state.RiskIndex < threshold {
+				t.Errorf("Tank %d with risk %.2f in group %d but threshold is %.2f",
+					state.TankID, state.RiskIndex, i, threshold)
+			}
+		}
+	}
+}
+
+func TestRootCause_SubproblemDecomposition(t *testing.T) {
+	cfg := testutils.NewTestConfig()
+	scheduler := NewMultiTankScheduler(cfg, nil, nil, nil)
+
+	maxTanks := scheduler.modelParams.MaxTanksPerSubproblem
+	testCases := []int{4, 8, 15, 20}
+
+	for _, nTanks := range testCases {
+		states := testutils.GenerateTankStatesForScheduler(nTanks, "random")
+		subproblems := scheduler.decomposeIntoSubproblems(states)
+
+		t.Logf("%d tanks -> %d subproblems", nTanks, len(subproblems))
+
+		totalTanks := 0
+		for i, sp := range subproblems {
+			totalTanks += len(sp)
+			t.Logf("  Subproblem %d: %d tanks", i, len(sp))
+			if len(sp) > maxTanks {
+				t.Errorf("Subproblem %d has %d tanks, exceeds max %d", i, len(sp), maxTanks)
+			}
+		}
+
+		if totalTanks != nTanks {
+			t.Errorf("Total tanks in subproblems %d != original %d", totalTanks, nTanks)
+		}
+
+		if nTanks > maxTanks && len(subproblems) < 2 {
+			t.Errorf("Expected multiple subproblems for %d tanks (max %d per subproblem)", nTanks, maxTanks)
+		}
+	}
+}
+
+func TestRootCause_DynamicCompressorConfig(t *testing.T) {
+	cfg := testutils.NewTestConfig()
+	scheduler := NewMultiTankScheduler(cfg, nil, nil, nil)
+
+	testTankCounts := []int{4, 10, 20}
+	compressorsPerTank := 2
+
+	for _, nTanks := range testTankCounts {
+		scheduler.ensureCompressorConfig(nTanks, compressorsPerTank)
+
+		expectedConfigs := nTanks * compressorsPerTank
+		actualConfigs := len(scheduler.modelParams.MaxLoadPctPerCompressor)
+
+		t.Logf("%d tanks -> %d compressor configs (expected %d)", nTanks, actualConfigs, expectedConfigs)
+
+		if actualConfigs < expectedConfigs {
+			t.Errorf("Expected at least %d compressor configs for %d tanks, got %d",
+				expectedConfigs, nTanks, actualConfigs)
+		}
+
+		for tankID := 1; tankID <= nTanks; tankID++ {
+			for compID := 1; compID <= compressorsPerTank; compID++ {
+				key := scheduler.compressorKey(tankID, compID)
+				maxLoad, exists := scheduler.modelParams.MaxLoadPctPerCompressor[key]
+				if !exists {
+					t.Errorf("Missing config for compressor %s", key)
+				}
+				if maxLoad != scheduler.modelParams.DefaultMaxLoadPct {
+					t.Errorf("Compressor %s has max load %.2f, expected %.2f",
+						key, maxLoad, scheduler.modelParams.DefaultMaxLoadPct)
+				}
+			}
+		}
+	}
+}

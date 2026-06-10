@@ -811,3 +811,137 @@ func TestUnloadingPredictionResultFields(t *testing.T) {
 
 	t.Logf("Unloading prediction: %+v", result)
 }
+
+func TestRootCause_FlowRateSuddenChangeResponse(t *testing.T) {
+	cfg := testutils.NewTestConfig()
+	predictor := &UnloadingPredictor{
+		cfg:         cfg,
+		modelParams: &cfg.ModelParams.Unloading,
+	}
+
+	nLayers := 20
+	initialTank := testutils.GenerateInitialTankState(nLayers, -165.0)
+
+	baseFlowRate := 500.0
+	suddenFlowRate := 1500.0
+	request := messages.UnloadingRequest{
+		TankID:        1,
+		UnloadingRate: baseFlowRate,
+		TotalVolume:   50000.0,
+		IncomingLNGTemp: -162.0,
+		IncomingLNGDensity: 430.0,
+		InitialState:  initialTank,
+		FlowRateChanges: []messages.FlowRateChange{
+			{ChangeTimeHours: 2.0, NewFlowRate: suddenFlowRate},
+		},
+	}
+
+	predictor.modelParams.AdaptiveFilteringOn = false
+	resultWithoutAdaptive := predictor.predictUnloading(nil, request)
+
+	predictor.modelParams.AdaptiveFilteringOn = true
+	resultWithAdaptive := predictor.predictUnloading(nil, request)
+
+	t.Logf("Without adaptive filtering - MaxTempDiff: %.2f, PumpOnTime: %.2fh",
+		resultWithoutAdaptive.MaxTempDiff, resultWithoutAdaptive.OptimalPumpOnTime)
+	t.Logf("With adaptive filtering - MaxTempDiff: %.2f, PumpOnTime: %.2fh",
+		resultWithAdaptive.MaxTempDiff, resultWithAdaptive.OptimalPumpOnTime)
+
+	if resultWithAdaptive.OptimalPumpOnTime >= resultWithoutAdaptive.OptimalPumpOnTime {
+		t.Errorf("Adaptive filtering should result in earlier pump on time. Without: %.2fh, With: %.2fh",
+			resultWithoutAdaptive.OptimalPumpOnTime, resultWithAdaptive.OptimalPumpOnTime)
+	}
+
+	responseImprovement := resultWithoutAdaptive.OptimalPumpOnTime - resultWithAdaptive.OptimalPumpOnTime
+	if responseImprovement < 0.3 {
+		t.Errorf("Expected at least 0.3h response improvement, got %.2fh", responseImprovement)
+	}
+
+	t.Logf("Response time improvement: %.2fh", responseImprovement)
+}
+
+func TestRootCause_AdaptiveFilteringParameters(t *testing.T) {
+	cfg := testutils.NewTestConfig()
+	predictor := &UnloadingPredictor{
+		cfg:         cfg,
+		modelParams: &cfg.ModelParams.Unloading,
+	}
+
+	stableFlowChange := 0.1
+	moderateFlowChange := 0.3
+	highFlowChange := 0.8
+
+	mixStable, dispStable := predictor.calculateAdaptiveParameters(stableFlowChange)
+	mixModerate, dispModerate := predictor.calculateAdaptiveParameters(moderateFlowChange)
+	mixHigh, dispHigh := predictor.calculateAdaptiveParameters(highFlowChange)
+
+	t.Logf("Stable flow (%.1f%%): mixing=%.4f, dispersion=%.4f", stableFlowChange*100, mixStable, dispStable)
+	t.Logf("Moderate flow (%.1f%%): mixing=%.4f, dispersion=%.4f", moderateFlowChange*100, mixModerate, dispModerate)
+	t.Logf("High flow (%.1f%%): mixing=%.4f, dispersion=%.4f", highFlowChange*100, mixHigh, dispHigh)
+
+	if mixStable != predictor.modelParams.MixingEfficiency {
+		t.Errorf("Expected base mixing efficiency for stable flow, got %.4f", mixStable)
+	}
+
+	if mixModerate <= mixStable {
+		t.Errorf("Expected higher mixing efficiency for moderate flow change. Stable: %.4f, Moderate: %.4f", mixStable, mixModerate)
+	}
+
+	if mixHigh <= mixModerate {
+		t.Errorf("Expected higher mixing efficiency for high flow change. Moderate: %.4f, High: %.4f", mixModerate, mixHigh)
+	}
+
+	if dispHigh <= dispStable {
+		t.Errorf("Expected higher dispersion for high flow change. Stable: %.4f, High: %.4f", dispStable, dispHigh)
+	}
+
+	maxMixing := predictor.modelParams.MixingEfficiency * (1.0 + predictor.modelParams.MaxMixingEfficiencyBoost)
+	if mixHigh > maxMixing {
+		t.Errorf("Mixing efficiency exceeded max limit: %.4f > %.4f", mixHigh, maxMixing)
+	}
+}
+
+func TestRootCause_FlowRateSmoothing(t *testing.T) {
+	cfg := testutils.NewTestConfig()
+	predictor := &UnloadingPredictor{
+		cfg:         cfg,
+		modelParams: &cfg.ModelParams.Unloading,
+	}
+
+	noisyFlowRates := []float64{500, 550, 480, 520, 600, 490, 510, 530, 470, 500}
+
+	smoothed := make([]float64, len(noisyFlowRates))
+	for i, flow := range noisyFlowRates {
+		smoothed[i] = predictor.smoothFlowRate(flow, noisyFlowRates[:i+1])
+	}
+
+	t.Logf("Original flow rates: %v", noisyFlowRates)
+	t.Logf("Smoothed flow rates: %v", smoothed)
+
+	originalVariance := calculateVariance(noisyFlowRates)
+	smoothedVariance := calculateVariance(smoothed)
+
+	t.Logf("Original variance: %.2f", originalVariance)
+	t.Logf("Smoothed variance: %.2f", smoothedVariance)
+
+	if smoothedVariance >= originalVariance {
+		t.Errorf("Flow smoothing should reduce variance. Original: %.2f, Smoothed: %.2f", originalVariance, smoothedVariance)
+	}
+
+	varianceReduction := (originalVariance - smoothedVariance) / originalVariance
+	if varianceReduction < 0.3 {
+		t.Errorf("Expected at least 30%% variance reduction, got %.2f%%", varianceReduction*100)
+	}
+}
+
+func calculateVariance(values []float64) float64 {
+	if len(values) < 2 {
+		return 0
+	}
+	mean := testutils.Mean(values)
+	var sumSq float64
+	for _, v := range values {
+		sumSq += math.Pow(v-mean, 2)
+	}
+	return sumSq / float64(len(values)-1)
+}
